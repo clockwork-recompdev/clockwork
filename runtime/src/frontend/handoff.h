@@ -1,6 +1,7 @@
 #pragma once
 // Handing a dump to the executable that has its game's recompiled code: each game is built as its
-// own executable next to the others, and any of them can show the launcher.
+// own executable next to the others, and any of them can show the launcher. The clockwork program
+// plays every game itself, from the game modules built in the data folder.
 #include "games.h"
 
 #include <string>
@@ -9,8 +10,11 @@ extern "C" const char *const clockwork_binary; // this executable's name (genera
 
 namespace frontend {
 
-// whether executable `name` is built next to this one
+// whether executable `name` is built next to this one, or (in the clockwork program, which has no
+// game of its own) its game module is built
 bool binary_available(const char *name);
+// whether this is the clockwork program and `name`'s game module is built, so it plays here
+bool module_available(const char *name);
 
 // what to do with a dump
 struct Route {

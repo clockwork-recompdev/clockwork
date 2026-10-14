@@ -1,6 +1,7 @@
 #include "handoff.h"
 
 #include "dump.h"
+#include "game_code.h"
 #include "log.h"
 
 #include <SDL3/SDL.h>
@@ -28,8 +29,13 @@ std::filesystem::path binary_path(const char *name) {
 
 } // namespace
 
+bool module_available(const char *name) {
+    std::error_code ec;
+    return !game_code::linked() && std::filesystem::is_regular_file(game_code::module_path(name), ec);
+}
+
 bool binary_available(const char *name) {
-    if (std::strcmp(name, clockwork_binary) == 0) return true;
+    if (std::strcmp(name, clockwork_binary) == 0 || module_available(name)) return true;
     std::error_code ec;
     return std::filesystem::is_regular_file(binary_path(name), ec);
 }
@@ -39,7 +45,7 @@ Route route(const std::string &dump_path) {
     if (!id) return {Route::UNREADABLE};
     const KnownDump *d = find_dump(*id);
     if (!d) return {Route::UNKNOWN};
-    if (std::strcmp(d->binary, clockwork_binary) == 0) return {Route::HERE, d};
+    if (std::strcmp(d->binary, clockwork_binary) == 0 || module_available(d->binary)) return {Route::HERE, d};
     return {binary_available(d->binary) ? Route::OTHER : Route::NOT_BUILT, d};
 }
 
@@ -50,8 +56,8 @@ std::string route_problem(const Route &r) {
     case Route::UNKNOWN: return "Clockwork doesn't recognize that game (or that region of it) yet.";
     case Route::NOT_BUILT: {
         const GameInfo *g = find_game(r.dump->game);
-        std::snprintf(buf, sizeof buf, "%s%s%s isn't built: its executable (%s) is missing.", g ? g->title : "?",
-                      *r.dump->version ? ": " : "", r.dump->version, r.dump->binary);
+        std::snprintf(buf, sizeof buf, "%s%s%s isn't built yet.", g ? g->title : "?", *r.dump->version ? ": " : "",
+                      r.dump->version);
         return buf;
     }
     default: return "";

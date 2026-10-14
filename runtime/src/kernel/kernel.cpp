@@ -1,5 +1,6 @@
 #include "kernel.h"
 
+#include "game_code.h"
 #include "log.h"
 #include "memory.h"
 
@@ -19,8 +20,8 @@ const auto start_time = std::chrono::steady_clock::now();
 
 RecompFn lookup(uint32_t addr) {
     addr &= ~1u;
-    auto end = recomp_functions + recomp_function_count;
-    auto it = std::lower_bound(recomp_functions, end, addr,
+    const RecompEntry *begin = game_code::functions(), *end = begin + game_code::function_count();
+    auto it = std::lower_bound(begin, end, addr,
                                [](const RecompEntry &e, uint32_t a) { return e.addr < a; });
     return it != end && it->addr == addr ? it->fn : nullptr;
 }

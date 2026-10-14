@@ -1,9 +1,10 @@
 //! ctrx: unpacks a decrypted 3DS dump for analysis.
 //!
-//! Usage: ctrx <dump.3ds|dump.cxi> [out_dir]   (out_dir defaults to ./extracted)
+//! Usage: ctrx [--code-only] <dump.3ds|dump.cxi> [out_dir]   (out_dir defaults to ./extracted)
 //!
 //! Writes exheader.bin, exefs/*, code.bin (decompressed .code), romfs/**,
 //! and info.txt with the memory layout and anything relevant to recompilation.
+//! With --code-only, the RomFS's files aren't written: the recompiler needs only the code.
 
 mod lz;
 mod ncch;
@@ -15,13 +16,15 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 fn main() {
-    let args: Vec<String> = std::env::args().collect();
+    let mut args: Vec<String> = std::env::args().collect();
+    let code_only = args.iter().any(|a| a == "--code-only");
+    args.retain(|a| a != "--code-only");
     if args.len() < 2 || args.len() > 3 {
-        eprintln!("usage: ctrx <dump.3ds|dump.cxi> [out_dir]");
+        eprintln!("usage: ctrx [--code-only] <dump.3ds|dump.cxi> [out_dir]");
         std::process::exit(2);
     }
     let out = PathBuf::from(args.get(2).map(String::as_str).unwrap_or("extracted"));
-    if let Err(e) = run(Path::new(&args[1]), &out) {
+    if let Err(e) = run(Path::new(&args[1]), &out, code_only) {
         eprintln!("error: {e}");
         std::process::exit(1);
     }
@@ -34,7 +37,7 @@ fn write(path: &Path, data: &[u8]) -> Result<(), String> {
     fs::write(path, data).map_err(|e| format!("{}: {e}", path.display()))
 }
 
-fn run(input: &Path, out: &Path) -> Result<(), String> {
+fn run(input: &Path, out: &Path, code_only: bool) -> Result<(), String> {
     // mapped, not read: untrimmed dumps are 4 GiB and we only touch partition 0
     let handle = fs::File::open(input).map_err(|e| format!("{}: {e}", input.display()))?;
     // SAFETY: the dump is only read, and isn't expected to change while we run
@@ -96,7 +99,9 @@ fn run(input: &Path, out: &Path) -> Result<(), String> {
         let files = romfs::list(romfs)?;
         let mut modules = Vec::new();
         for f in &files {
-            write(&out.join("romfs").join(&f.path), &romfs[f.offset..f.offset + f.size])?;
+            if !code_only {
+                write(&out.join("romfs").join(&f.path), &romfs[f.offset..f.offset + f.size])?;
+            }
             let ext = f.path.extension().and_then(|e| e.to_str()).unwrap_or("");
             if matches!(ext, "cro" | "crs" | "crr") {
                 modules.push(f.path.display().to_string());

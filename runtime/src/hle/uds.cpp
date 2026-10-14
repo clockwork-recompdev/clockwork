@@ -12,6 +12,7 @@
 #include "net/air.h"
 
 #include <algorithm>
+#include <bit>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -529,7 +530,7 @@ struct Uds : Service {
             r.push(node_id | uint32_t(changed_nodes) << 16); // this node's id, nodes that changed
             for (uint32_t i = 0; i < MAX_NODES; i += 2) // node ids present, two a word
                 r.push((mask >> i & 1 ? i + 1 : 0) | (mask >> (i + 1) & 1 ? i + 2 : 0) << 16);
-            uint32_t total = uint32_t(__builtin_popcount(mask));
+            uint32_t total = uint32_t(std::popcount(mask));
             r.push(total | uint32_t(max_nodes()) << 8 | uint32_t(mask) << 16); // total, max, bitmask
             std::array<uint32_t, 5> now{status, reason, node_id, changed_nodes, mask};
             if (now != last_status)

@@ -1,8 +1,8 @@
 name: release
 
-# Pushing a tag like v0.1.0 builds the tools for each platform and publishes them as a release.
-# The packages hold only Clockwork's own tools: no game code, which is only ever made from a
-# player's own dump on their own PC.
+# Pushing a tag like v0.2.0 builds Clockwork for each platform (tools/package.sh) and publishes it
+# as a release. The packages hold no game code: the launcher builds each game from the player's
+# own dump, on their PC.
 on:
   push:
     tags: ["v*"]
@@ -11,62 +11,72 @@ on:
 permissions:
   contents: write
 
+env:
+  SDL_VERSION: release-3.4.16
+
 jobs:
   package:
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             name: linux-x86_64
           - os: windows-latest
             name: windows-x86_64
           - os: macos-latest # Apple Silicon
             name: macos-arm64
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo build --workspace --release
-      # the relay server for Rooms is just sockets, so it builds without CMake or SDL
-      - name: Build clockwork-relay
-        shell: bash
+
+      - name: Libraries (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build patchelf libcurl4-openssl-dev libarchive-dev \
+            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxss-dev libxtst-dev libxfixes-dev \
+            libwayland-dev libxkbcommon-dev wayland-protocols libegl1-mesa-dev libgl1-mesa-dev libdrm-dev libgbm-dev \
+            libdecor-0-dev libasound2-dev libpulse-dev libpipewire-0.3-dev libdbus-1-dev libudev-dev libibus-1.0-dev
+          git clone --depth 1 -b "$SDL_VERSION" https://github.com/libsdl-org/SDL.git sdl
+          cmake -S sdl -B sdl/build -G Ninja -DCMAKE_BUILD_TYPE=Release -DSDL_TESTS=OFF -DSDL_EXAMPLES=OFF \
+            -DCMAKE_INSTALL_PREFIX="$PWD/sdl-install"
+          cmake --build sdl/build
+          cmake --install sdl/build
+          echo "CMAKE_PREFIX_PATH=$PWD/sdl-install" >> "$GITHUB_ENV"
+      - name: Libraries (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install ninja sdl3 libarchive dylibbundler
+          echo "CMAKE_PREFIX_PATH=$(brew --prefix libarchive);$(brew --prefix sdl3)" >> "$GITHUB_ENV"
+      - name: Libraries (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          "$VCPKG_INSTALLATION_ROOT/vcpkg" install sdl3 curl libarchive --triplet x64-windows
+          echo "CMAKE_ARGS=-DCMAKE_TOOLCHAIN_FILE=$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake -DVCPKG_TARGET_TRIPLET=x64-windows" >> "$GITHUB_ENV"
+
+      - name: Build
         run: |
           if [ "$RUNNER_OS" = Windows ]; then
-            clang++ -std=c++20 -O2 -DNOMINMAX -DWIN32_LEAN_AND_MEAN -Iruntime/src \
-              runtime/src/net/relay.cpp runtime/src/net/relay_main.cpp -lws2_32 -o clockwork-relay.exe
+            cmake -B build $CMAKE_ARGS
+            cmake --build build --config Release --target clockwork clockwork-relay
+            echo "BIN=build/Release" >> "$GITHUB_ENV"
           else
-            clang++ -std=c++20 -O2 -Iruntime/src runtime/src/net/relay.cpp runtime/src/net/relay_main.cpp -o clockwork-relay
-            strip clockwork-relay
+            cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+            cmake --build build --target clockwork clockwork-relay
+            echo "BIN=build" >> "$GITHUB_ENV"
           fi
       - name: Package
-        shell: bash
-        run: |
-          d=clockwork-tools-${{ matrix.name }}
-          mkdir "$d"
-          x=; [ "$RUNNER_OS" = Windows ] && x=.exe
-          cp target/release/ctrx$x target/release/recomp$x clockwork-relay$x "$d/"
-          cat > "$d/README.txt" <<'EOF'
-          Clockwork tools
-          ===============
-
-          ctrx             unpacks a decrypted 3DS dump:  ctrx <dump.3ds|dump.cci> <out_dir>
-          recomp           recompiles an unpacked game to C:  recomp emit <unpacked_dir> <out_dir>
-          clockwork-relay  the Rooms server for local wireless play over the internet
-                           (UDP port 47830 by default; --port N to change it)
-
-          No game code or assets are included. You play from dumps of cartridges you own; see
-          https://github.com/clockwork-recompdev/clockwork for building the games.
-          EOF
-          if [ "$RUNNER_OS" = Windows ]; then
-            7z a "$d.zip" "$d" > /dev/null
-          else
-            tar czf "$d.tar.gz" "$d"
-          fi
+        run: tools/package.sh ${{ matrix.name }} "$BIN"
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.name }}
-          path: clockwork-tools-*.*
+          path: dist/clockwork-*.*
 
   release:
     needs: package
@@ -81,8 +91,8 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           if [ "${{ github.ref_type }}" != tag ]; then
-            echo "Not a tag: packages are attached to this run only."
+            echo "Not a tag: the packages are attached to this run only."
             exit 0
           fi
-          gh release create "$TAG" clockwork-tools-* --repo "$GITHUB_REPOSITORY" --title "Clockwork $TAG" \
-            --notes "Clockwork's tools for Windows, Linux and macOS (Apple Silicon): ctrx, recomp and clockwork-relay. No game code or assets are included."
+          gh release create "$TAG" clockwork-* --repo "$GITHUB_REPOSITORY" --title "Clockwork $TAG" --notes \
+            "Clockwork for Windows, Linux and macOS (Apple Silicon). No game is included: the launcher builds each game from a dump of your own cartridge, on your PC, which needs a C compiler (see README.txt in the package)."

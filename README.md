@@ -54,9 +54,15 @@ decrypted (*Decrypt file* if needed). Put the dumps in `dump/` (ignored by git).
 
 Needs Rust, CMake 3.24+, a C/C++ compiler (Clang, GCC or MSVC), SDL3, libcurl and libarchive.
 
-Build the runtime once (`cmake -B build -G Ninja && cmake --build build`, with any one game's
-code generated as below; CMake needs at least one). After that, **the launcher builds games for
-you**: add a dump (Browse, or put it in the dump folder) and it unpacks, recompiles and compiles
+**Releases** are the easiest way: each one is the `clockwork` program (launcher and runtime, no
+game), the tools, and what a game's code is compiled with. Add a dump and it builds that game as a
+module in the data folder, with this PC's C compiler (Visual Studio's Build Tools on Windows, Xcode's
+command line tools on macOS, gcc or clang on Linux); `clockwork` then plays it. Pushing a `v*` tag
+makes one (`.github/workflows/release.yml`, `tools/package.sh`).
+
+From source: build once (`cmake -B build -G Ninja && cmake --build build`), which makes
+`clockwork` and the relay, plus any game whose code is generated. After that, **the launcher builds
+games for you**: add a dump (Browse, or put it in the dump folder) and it unpacks, recompiles and compiles
 that game's executable in the background, with progress on the Library tab and the tools' output in
 `build.log` in the data folder. Adding another version of a game that shares an executable
 rebuilds it with both.
@@ -82,8 +88,7 @@ cmake -B build -G Ninja && cmake --build build
 
 CMake builds whichever games have generated code (each folder is a cache variable, e.g.
 `-DYW3_GENERATED_DIR=...`), plus `clockwork-relay`. `extracted/<game>/info.txt` summarizes a dump's
-memory layout and the system modules it uses. `tools/package-linux.sh` makes an optimized Linux
-package with SDL3 bundled and no game data.
+memory layout and the system modules it uses.
 
 ## Playing
 

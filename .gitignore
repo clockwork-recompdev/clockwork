@@ -6,3 +6,4 @@
 # Build output
 /target/
 /build/
+/dist/

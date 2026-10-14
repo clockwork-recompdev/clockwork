@@ -2,6 +2,7 @@
 #include "frontend/games.h"
 #include "mods.h"
 #include "frontend/frontend.h"
+#include "game_code.h"
 #include "kernel/kernel.h"
 #include "loader.h"
 #include "log.h"
@@ -33,6 +34,11 @@ void game_main(const char *dump_path) {
     const frontend::KnownDump *known = frontend::find_dump(dump().program_id());
     mods::apply(dump(), known ? known->game : "", dump().program_id());
     mem::init();
+    if (!game_code::linked()) { // the clockwork program: the game's code is its module
+        std::string why;
+        if (!known) fatal("Clockwork doesn't recognize this game.");
+        if (!game_code::load_module(known->binary, &why)) fatal("%s", why.c_str());
+    }
     game = load_game();
     kernel::init(game);
     if (net::air_wanted()) net::air_start(); // in the room from the start, so the others see us
