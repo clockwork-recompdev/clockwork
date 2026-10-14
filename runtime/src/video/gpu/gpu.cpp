@@ -907,7 +907,7 @@ void begin_draw() {
 void triangle(const Vertex &v0, const Vertex &v1, const Vertex &v2) {
     if (cur_skip) return;
     const Vertex *v[3] = {&v0, &v1, &v2};
-    float ky[3] = {1, 1, 1}, shift = 0;
+    float ky[3] = {1, 1, 1}, kx = 1, shift = 0;
     if (cur_ky != 1.0f) { // widescreen: see widescreen.cpp
         bool perspective = false;
         float lo = 1e9f, hi = -1e9f, xlo = 1e9f, xhi = -1e9f;
@@ -921,6 +921,11 @@ void triangle(const Vertex &v0, const Vertex &v1, const Vertex &v2) {
         bool full_screen =
             draw_fills_screen || (!perspective && lo <= -0.99f && hi >= 0.99f && xlo <= -0.99f && xhi >= 0.99f);
         if (!full_screen) ky[0] = ky[1] = ky[2] = cur_ky;
+        // the camera pulled back: the 3D scene drawn smaller about the middle
+        if (!full_screen && perspective) {
+            kx = camera_zoom();
+            for (float &k : ky) k *= kx;
+        }
         // 2D on the sides keeps its distance from the (new) screen edge
         if (!full_screen && !perspective) shift = float(draw_anchor) * (1.0f - cur_ky);
     }
@@ -937,7 +942,7 @@ void triangle(const Vertex &v0, const Vertex &v1, const Vertex &v2) {
     for (int i = 0; i < 3; i++) {
         const float *a = v[i]->a;
         GpuVertex g;
-        g.pos[0] = a[POS], g.pos[1] = a[POS + 1] * ky[i] + shift * a[POS + 3], g.pos[2] = a[POS + 2], g.pos[3] = a[POS + 3];
+        g.pos[0] = a[POS] * kx, g.pos[1] = a[POS + 1] * ky[i] + shift * a[POS + 3], g.pos[2] = a[POS + 2], g.pos[3] = a[POS + 3];
         for (int c = 0; c < 4; c++) g.color[c] = a[COLOR + c], g.quat[c] = a[QUAT + c];
         g.tc01[0] = a[TEX0], g.tc01[1] = a[TEX0 + 1], g.tc01[2] = a[TEX1], g.tc01[3] = a[TEX1 + 1];
         g.tc2w[0] = a[TEX2], g.tc2w[1] = a[TEX2 + 1], g.tc2w[2] = a[TEX0_W], g.tc2w[3] = 0;
@@ -986,8 +991,11 @@ struct PlacedDraw {
     DrawGeom g;
     float ky;     // the target's widescreen factor (cur_ky) when drawn
     float k = 1;  // HUD scale applied to it since (a shift before scaling moves it k times as far)
+    float ax = 0, ay = 0; // the point it shrank toward, when it did
 };
 std::vector<PlacedDraw> placed;
+
+void shrink(uint32_t first, uint32_t count, float ax, float ay, float k);
 
 void anchor_groups() {
     size_t n = placed.size();
@@ -998,9 +1006,10 @@ void anchor_groups() {
         while (parent[i] != i) i = parent[i] = parent[parent[i]];
         return i;
     };
-    // Pieces belong together when one lies mostly on the other (a bubble's text and portrait on its
-    // background), or when they touch and keep to the same side (the rows of a panel). Merely
-    // touching isn't enough: a chat bubble flying past the area name would be pulled to its side
+    // Pieces belong together when they really overlap (a bubble's text on its background, and its
+    // portrait, which covers only the bubble's end: a fifth of the portrait or so), or when they
+    // touch and keep to the same side (the rows of a panel). Merely touching isn't enough: a chat
+    // bubble flying past the area name would be pulled to its side
     constexpr float EPS = 0.01f;
     auto area = [](const DrawGeom &g) { return std::max(g.xhi - g.xlo, 0.0f) * std::max(g.yhi - g.ylo, 0.0f); };
     for (size_t i = 0; i < n; i++)
@@ -1009,8 +1018,22 @@ void anchor_groups() {
             if (!(a.xlo <= b.xhi + EPS && b.xlo <= a.xhi + EPS && a.ylo <= b.yhi + EPS && b.ylo <= a.yhi + EPS)) continue;
             float common = std::max(std::min(a.xhi, b.xhi) - std::max(a.xlo, b.xlo), 0.0f) *
                            std::max(std::min(a.yhi, b.yhi) - std::max(a.ylo, b.ylo), 0.0f);
-            if (common >= 0.5f * std::min(area(a), area(b)) || (a.own && a.own == b.own)) parent[root(i)] = root(j);
+            if (common >= 0.1f * std::min(area(a), area(b)) || (a.own && a.own == b.own)) parent[root(i)] = root(j);
         }
+    // a group is HUD as a whole: when its largest piece shrank as HUD, the pieces that didn't shrink
+    // with it the same way (a portrait reaching past the screen's edge, behind its dialogue box,
+    // otherwise stays full size above the shrunken box)
+    std::vector<size_t> scaled(n, SIZE_MAX); // per root: its largest HUD-scaled piece
+    for (size_t i = 0; i < n; i++) {
+        size_t r = root(i);
+        if (placed[i].k < 1.0f && (scaled[r] == SIZE_MAX || area(placed[i].g) > area(placed[scaled[r]].g))) scaled[r] = i;
+    }
+    for (size_t i = 0; i < n; i++) {
+        size_t s = scaled[root(i)];
+        if (s == SIZE_MAX || placed[i].k != 1.0f) continue;
+        const PlacedDraw &hud = placed[s];
+        shrink(placed[i].first, placed[i].count, hud.ax, hud.ay, hud.k);
+    }
     std::vector<int> side(n, 2); // per root: 2 undecided, 3 conflicting, else -1/0/1
     std::vector<bool> pinned(n, false);
     for (size_t i = 0; i < n; i++) {
@@ -1036,7 +1059,7 @@ void anchor_groups() {
 
 void shrink(uint32_t first, uint32_t count, float ax, float ay, float k) {
     for (PlacedDraw &d : placed)
-        if (d.first == first) d.k *= k;
+        if (d.first == first) d.k *= k, d.ax = ax, d.ay = ay;
     for (uint32_t i = first; i < first + count; i++) {
         float *p = vertices[i].pos;
         p[0] = ax + (p[0] - ax) * k;

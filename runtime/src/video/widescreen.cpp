@@ -92,6 +92,12 @@ std::atomic<int> hud_percent{100};
 void set_hud_scale(float scale) { hud_percent = int(std::clamp(scale, 0.4f, 1.0f) * 100.0f + 0.5f); }
 float hud_scale() { return float(hud_percent) / 100.0f; }
 
+namespace {
+std::atomic<int> zoom_percent{100};
+}
+void set_camera_zoom(float zoom) { zoom_percent = int(std::clamp(zoom, 0.6f, 1.0f) * 100.0f + 0.5f); }
+float camera_zoom() { return float(zoom_percent) / 100.0f; }
+
 bool wide_target(uint32_t color_addr, uint32_t depth_addr, uint32_t width, uint32_t height, uint32_t color_format,
                  uint32_t depth_format, ShadowTarget *out) {
     wide_margin = requested_margin, scale = requested_scale;

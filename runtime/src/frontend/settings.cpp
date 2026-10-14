@@ -123,6 +123,7 @@ void Settings::load() {
         else if (k == "filter") filter = std::atoi(v.c_str());
         else if (k == "resolution") resolution = std::atoi(v.c_str());
         else if (k == "hud_size") hud_size = std::atoi(v.c_str());
+        else if (k == "camera_zoom") camera_zoom = std::atoi(v.c_str());
         else if (k == "gpu_renderer") gpu_renderer = b;
         else if (k == "prefer_integrated_gpu") prefer_integrated_gpu = b;
         else if (k == "volume") volume = std::atoi(v.c_str());
@@ -162,6 +163,7 @@ void Settings::save() const {
       << "filter=" << filter << "\n"
       << "resolution=" << resolution << "\n"
       << "hud_size=" << hud_size << "\n"
+      << "camera_zoom=" << camera_zoom << "\n"
       << "gpu_renderer=" << gpu_renderer << "\n"
       << "prefer_integrated_gpu=" << prefer_integrated_gpu << "\n"
       << "volume=" << volume << "\n"

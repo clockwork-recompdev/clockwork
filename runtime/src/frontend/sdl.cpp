@@ -587,6 +587,8 @@ void run(void (*start)(const char *dump), const char *cli_dump, bool force_launc
     pica::set_widescreen(s.widescreen);
     pica::set_resolution_scale(s.resolution);
     pica::set_hud_scale(float(s.hud_size) / 100.0f);
+    pica::set_camera_zoom(float(s.camera_zoom) / 100.0f);
+    if (const char *e = std::getenv("YW2_ZOOM")) pica::set_camera_zoom(float(std::atoi(e)) / 100.0f);
     if (const char *e = std::getenv("YW2_HUD")) pica::set_hud_scale(float(std::atoi(e)) / 100.0f);
     if (const char *e = std::getenv("YW2_SCALE")) pica::set_resolution_scale(std::atoi(e)); // test overrides
     if (const char *e = std::getenv("YW2_WIDESCREEN")) pica::set_widescreen(std::atoi(e) != 0);

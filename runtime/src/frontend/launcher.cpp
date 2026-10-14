@@ -1002,6 +1002,9 @@ bool run_launcher(SDL_Window *window, SDL_Renderer *renderer, const std::string 
                 ImGui::SetNextItemWidth(ImGui::GetFontSize() * 18);
                 ImGui::SliderInt("HUD size", &s.hud_size, 50, 100, "%d%%");
                 ImGui::TextDisabled("Dialogue boxes and other 2D on the top screen (GPU renderer).");
+                ImGui::SetNextItemWidth(ImGui::GetFontSize() * 18);
+                ImGui::SliderInt("Camera zoom", &s.camera_zoom, 60, 100, "%d%%");
+                ImGui::TextDisabled("Widescreen: below 100%% pulls the camera back to show more of the scene.");
                 section("Window");
                 ImGui::Checkbox("Fullscreen", &s.fullscreen);
                 ImGui::Checkbox("VSync", &s.vsync);

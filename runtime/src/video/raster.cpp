@@ -734,6 +734,10 @@ void draw_triangle(const Vertex &v0, const Vertex &v1, const Vertex &v2) {
             ky = cur.wide_k;
         } else if (perspective) {
             ky = cur.wide_k;
+            if (cur.wide_k != 1.0f) { // the camera pulled back: the 3D scene drawn smaller about the middle
+                float z = camera_zoom();
+                for (int i = 0; i < 3; i++) in[i].a[POS] *= z, in[i].a[POS + 1] *= z;
+            }
         } else if (draw_anchor) { // 2D on the sides keeps its distance from the (new) screen edge
             for (int i = 0; i < 3; i++) in[i].a[POS + 1] += float(draw_anchor) * (cur.wide_k - 1.0f) * in[i].a[POS + 3];
             ky = cur.wide_k; // clipped at the wide screen's edges

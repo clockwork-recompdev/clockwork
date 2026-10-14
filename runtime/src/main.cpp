@@ -17,8 +17,10 @@
 #include <dlfcn.h>
 #include <execinfo.h>
 #include <sys/time.h>
-#include <ucontext.h>
 #include <unistd.h>
+#if defined(__linux__)
+#include <ucontext.h> // the profiler (Linux only)
+#endif
 
 #include <algorithm>
 #include <atomic>

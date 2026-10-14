@@ -173,6 +173,8 @@ void decode_texture(const Texture &t, uint8_t *rgba);
 void requested_enhancement(int *margin, int *scale);
 // the HUD size the user asked for (1 = the game's own; GPU renderer only)
 float hud_scale();
+// widescreen: the factor 3D (perspective) triangles on the top screen are drawn at (see set_camera_zoom)
+float camera_zoom();
 // whether the top screen shows 3D (last frame, or so far in this one): on the game thread. Without
 // it, the top screen is a menu, all of it UI, and the HUD size leaves it alone
 bool top_has_3d();

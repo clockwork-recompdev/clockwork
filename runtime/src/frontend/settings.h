@@ -36,6 +36,7 @@ struct Settings {
     int filter = FILTER_SHARP;
     int resolution = 1; // internal resolution of the top screen's 3D, times native (1-4)
     int hud_size = 80;  // percent: the top screen's dialogue boxes and other 2D HUD
+    int camera_zoom = 90; // percent, in widescreen: the 3D scene's size (less shows more of it)
     bool gpu_renderer = true; // draw on the GPU (SDL_GPU); off: the software renderer
     bool prefer_integrated_gpu = false; // on laptops with two GPUs: the power-saving one
     // one-screen layouts chosen with F5: "<game>.<kind of scene>" -> layout (see sdl.cpp)
