@@ -1,0 +1,19 @@
+name: build
+
+on: [push, pull_request]
+
+jobs:
+  tools:
+    strategy:
+      fail-fast: false
+      matrix:
+        # macos-latest is Apple Silicon (arm64)
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - run: cargo clippy --workspace --release -- -D warnings
+      - run: cargo build --workspace --release

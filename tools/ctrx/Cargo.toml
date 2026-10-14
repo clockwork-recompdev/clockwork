@@ -1,0 +1,8 @@
+[package]
+name = "ctrx"
+version = "0.1.0"
+edition = "2021"
+description = "Unpacks a decrypted 3DS dump (NCSD/NCCH) into ExeFS, exheader info and RomFS"
+
+[dependencies]
+memmap2 = "0.9.11"

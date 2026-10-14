@@ -1,0 +1,8 @@
+# Game data must never be committed. Players supply their own dump.
+/dump/*
+!/dump/README.md
+/extracted/
+
+# Build output
+/target/
+/build/

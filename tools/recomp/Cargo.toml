@@ -1,0 +1,7 @@
+[package]
+name = "recomp"
+version = "0.1.0"
+edition = "2024"
+description = "Static recompiler: 3DS ARM/Thumb code to portable C"
+
+[dependencies]
