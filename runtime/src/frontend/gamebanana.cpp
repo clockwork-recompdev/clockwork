@@ -95,7 +95,7 @@ bool extract(const fs::path &archive, const fs::path &to, std::string &error) {
     struct archive_entry *e;
     int r;
     while ((r = archive_read_next_header(a, &e)) == ARCHIVE_OK) {
-        mode_t type = archive_entry_filetype(e);
+        auto type = archive_entry_filetype(e);
         if (type != AE_IFREG && type != AE_IFDIR) continue; // no links, devices
         std::string name = archive_entry_pathname(e) ? archive_entry_pathname(e) : "";
         std::replace(name.begin(), name.end(), '\\', '/'); // archives made on Windows

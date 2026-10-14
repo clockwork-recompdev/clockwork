@@ -53,7 +53,7 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           brew install ninja sdl3 libarchive dylibbundler
-          echo "CMAKE_PREFIX_PATH=$(brew --prefix libarchive);$(brew --prefix sdl3)" >> "$GITHUB_ENV"
+          echo "CMAKE_PREFIX_PATH=$(brew --prefix libarchive):$(brew --prefix sdl3)" >> "$GITHUB_ENV"
       - name: Libraries (Windows)
         if: runner.os == 'Windows'
         run: |

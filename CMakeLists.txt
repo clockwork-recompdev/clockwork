@@ -27,6 +27,10 @@ set(YW1_GENERATED_DIR "${CMAKE_SOURCE_DIR}/build/generated-yw1" CACHE PATH
 set(CLOCKWORK_GAMES "yw1=${YW1_GENERATED_DIR}" "yw2=${YW2_GENERATED_DIR}" "yw2bf=${YW2BF_GENERATED_DIR}" "blasters=${BLASTERS_GENERATED_DIR}"
     "yw3=${YW3_GENERATED_DIR}" "busters2=${BUSTERS2_GENERATED_DIR}")
 
+if(WIN32)
+    add_compile_definitions(NOMINMAX WIN32_LEAN_AND_MEAN) # windows.h's min/max macros break std::min
+endif()
+
 add_library(runtime OBJECT
     runtime/src/arm_ops.c
     runtime/src/audio/dsp_hle.cpp

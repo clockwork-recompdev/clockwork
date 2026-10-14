@@ -3,6 +3,7 @@
 // and the RomFS, which the game's file system code reads as one image.
 
 #include <cstdint>
+#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -59,7 +60,7 @@ private:
         std::vector<level5::Piece> pieces; // original_offset already in the RomFS
         std::map<std::string, std::unique_ptr<std::ifstream>> open; // host files, opened on first read
     };
-    std::vector<Replacement> replacements_;
+    std::deque<Replacement> replacements_; // (not a vector: MSVC would copy them to grow it)
     bool index_romfs(); // fills the above; false if the RomFS tables don't read
     void read_replacement(Replacement &r, uint64_t at, uint8_t *dst, uint64_t n);
 
