@@ -34,8 +34,9 @@ struct BuildJob {
     std::string log_path;   // everything the tools printed
 };
 
-// Builds executable `binary` from `dumps` (program id and path; every version that shares it),
-// on its own thread. `job` must not be running
+// Builds executable `binary` from `dumps` (program id and path; every version that shares it: the
+// path is its update's when the executable is built from updates, see code_binary), on its own
+// thread. `job` must not be running
 void start_build(const std::shared_ptr<BuildJob> &job, const std::string &binary,
                  std::vector<std::pair<uint64_t, std::string>> dumps);
 

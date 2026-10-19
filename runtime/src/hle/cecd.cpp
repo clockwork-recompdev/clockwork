@@ -20,7 +20,7 @@ constexpr uint32_t ERR_NOT_FOUND = 0xC880BBFA;
 std::filesystem::path box_file(uint32_t title, uint32_t type) {
     char name[32];
     std::snprintf(name, sizeof name, "%08x_%u.bin", title, type);
-    auto dir = platform::data_dir() / "cec";
+    auto dir = platform::state_dir() / "cec";
     std::filesystem::create_directories(dir);
     return dir / name;
 }

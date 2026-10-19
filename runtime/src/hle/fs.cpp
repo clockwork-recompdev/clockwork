@@ -89,15 +89,15 @@ std::optional<fs::path> host_path(const fs::path &root, const Path &p) {
 // ---- files ----
 
 struct File : Service {
-    // RomFS-backed (read-only) or a host file
-    bool romfs = false;
+    // RomFS-backed (read-only: the game's, or its update's) or a host file
+    bool romfs = false, update = false;
     std::fstream host;
     fs::path host_path;
 
     File() : Service("fs file") {}
 
     uint64_t size() {
-        if (romfs) return dump().romfs_size();
+        if (romfs) return update ? dump().update_romfs_size() : dump().romfs_size();
         return fs::file_size(host_path);
     }
 
@@ -108,14 +108,15 @@ struct File : Service {
             uint32_t len = req.arg(2), dest = req.arg(4);
             uint64_t got;
             if (romfs) {
-                got = dump().read_romfs(offset, mem::ptr(dest), len);
+                got = update ? dump().read_update_romfs(offset, mem::ptr(dest), len)
+                             : dump().read_romfs(offset, mem::ptr(dest), len);
             } else {
                 host.clear();
                 host.seekg(std::streamoff(offset));
                 host.read(reinterpret_cast<char *>(mem::ptr(dest)), len);
                 got = uint64_t(host.gcount());
             }
-            LOG_IPC("fs Read %s %#llx+%#x -> %#llx", romfs ? "romfs" : "file", (unsigned long long)offset, len,
+            LOG_IPC("fs Read %s %#llx+%#x -> %#llx", romfs ? (update ? "update-romfs" : "romfs") : "file", (unsigned long long)offset, len,
                     (unsigned long long)got);
             uint32_t desc = req.arg(3);
             auto r = req.reply(2, 2);
@@ -318,7 +319,7 @@ fs::path fill_version(const Archive &a, const fs::path &p) {
 
 // moves the save from before per-game folders into Psychic Specters' (the only game there was)
 void move_old_saves() {
-    fs::path top = platform::data_dir(), to = platform::game_dir(PSYCHIC_SPECTERS);
+    fs::path top = platform::state_dir(), to = platform::game_dir(PSYCHIC_SPECTERS);
     std::error_code ec;
     if (!fs::exists(top / "save", ec)) return;
     if (fs::exists(to / "save", ec)) {
@@ -361,7 +362,7 @@ struct FsUser : Service {
     fs::path extdata_root(uint32_t low, uint32_t high) const {
         char name[24];
         std::snprintf(name, sizeof name, "%08x%08x", high, low);
-        return platform::data_dir() / "extdata" / name;
+        return platform::state_dir() / "extdata" / name;
     }
     fs::path secure_value_path(uint32_t slot) const {
         return game_root() / ("save_secure_value_" + std::to_string(slot) + ".bin");
@@ -398,7 +399,7 @@ struct FsUser : Service {
             return kernel::RESULT_OK;
         }
         case SDMC: {
-            fs::path root = platform::data_dir() / "sdmc";
+            fs::path root = platform::state_dir() / "sdmc";
             fs::create_directories(root);
             *out = {id, root};
             return kernel::RESULT_OK;
@@ -410,7 +411,7 @@ struct FsUser : Service {
                                                      : 0;
             char name[16];
             std::snprintf(name, sizeof name, "%08x", ext_id);
-            fs::path root = platform::data_dir() / "extdata" / "shared" / name;
+            fs::path root = platform::state_dir() / "extdata" / "shared" / name;
             if (ext_id == PLAY_COINS_EXTDATA) create_play_coins(root);
             if (!fs::exists(root)) {
                 LOG("fs: shared extdata %08x not present", ext_id);
@@ -442,14 +443,17 @@ struct FsUser : Service {
     uint32_t open_file(const Archive &a, const Path &path, uint32_t flags, std::shared_ptr<File> *out) {
         auto f = std::make_shared<File>();
         if (a.root.empty()) {
-            // RomFS: binary path whose first word is the content type (0 = RomFS)
+            // RomFS: binary path whose first word is the content type (0 = RomFS, 5 = the update's
+            // RomFS, which a game with no update installed doesn't find)
             uint32_t type = 0;
             if (path.data.size() >= 4) std::memcpy(&type, path.data.data(), 4);
-            if (type != 0) {
+            if (type == 5 && !dump().has_update()) return ERR_FILE_NOT_FOUND;
+            if (type != 0 && type != 5) {
                 LOG("fs: NCCH content type %u not supported", type);
                 return ERR_FILE_NOT_FOUND;
             }
-            f->romfs = true;
+            f->romfs = true, f->update = type == 5;
+            if (f->update) LOG("fs: the game opened its update's RomFS");
             *out = f;
             return kernel::RESULT_OK;
         }

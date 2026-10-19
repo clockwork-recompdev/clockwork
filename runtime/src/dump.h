@@ -1,6 +1,8 @@
 #pragma once
-// Reads the player's own decrypted dump (.3ds/.cci or .cxi): exheader, decompressed .code,
-// and the RomFS, which the game's file system code reads as one image.
+// Reads the player's own decrypted dump (.3ds/.cci, .cxi or .cia): exheader, decompressed .code,
+// and the RomFS, which the game's file system code reads as one image. With an update (its own
+// decrypted .cia or .cxi), the code is the update's, and the update's RomFS is a second one: the
+// game mounts both, reading files from the update's first (the update ships only what changed).
 
 #include <cstdint>
 #include <deque>
@@ -17,11 +19,18 @@
 
 class Dump {
 public:
-    explicit Dump(const std::filesystem::path &path);
+    // `update`: empty for none
+    Dump(const std::filesystem::path &path, const std::filesystem::path &update = {});
+    ~Dump();
 
     const std::vector<uint8_t> &exheader() const { return exheader_; }
     const std::vector<uint8_t> &code() const { return code_; }
-    uint64_t program_id() const { return program_id_; }
+    uint64_t program_id() const { return program_id_; } // the game's, also with an update
+
+    // the update's RomFS (NCCH content type 5): empty without one
+    bool has_update() const { return update_ != nullptr; }
+    uint64_t update_romfs_size() const;
+    uint64_t read_update_romfs(uint64_t offset, void *out, uint64_t size);
 
     // the RomFS as the game sees it (IVFC level 3: header, tables, file data), with mods applied
     uint64_t romfs_size() const { return romfs_size_; }
@@ -46,6 +55,8 @@ public:
     std::vector<std::string> romfs_paths();
 
 private:
+    struct Update; // the update's file and RomFS
+    std::unique_ptr<Update> update_;
     std::ifstream file_;
     std::mutex read_lock_;
     std::vector<uint8_t> exheader_, code_;
@@ -68,8 +79,14 @@ private:
 };
 
 // the program id of a dump, read from its header without loading it; nullopt if it isn't a
-// readable, decrypted .3ds/.cci or .cxi
+// readable, decrypted .3ds/.cci, .cxi or .cia. An update's is its own (0004000E...: see update_of)
 std::optional<uint64_t> peek_program_id(const std::filesystem::path &path);
 
+// updates: the game an update's program id updates (0004000E... -> 00040000...); nullopt if it isn't one
+inline std::optional<uint64_t> update_of(uint64_t id) {
+    if ((id >> 32) != 0x0004000E) return std::nullopt;
+    return (id & 0xFFFFFFFFull) | (uint64_t(0x00040000) << 32);
+}
+
 Dump &dump();
-void open_dump(const std::filesystem::path &path);
+void open_dump(const std::filesystem::path &path, const std::filesystem::path &update = {});

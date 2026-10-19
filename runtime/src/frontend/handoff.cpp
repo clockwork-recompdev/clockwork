@@ -3,6 +3,7 @@
 #include "dump.h"
 #include "game_code.h"
 #include "log.h"
+#include "settings.h"
 
 #include <SDL3/SDL.h>
 
@@ -29,6 +30,30 @@ std::filesystem::path binary_path(const char *name) {
 
 } // namespace
 
+namespace {
+std::pair<uint64_t, std::string> update_override; // use_update: the game's program id, and its update
+} // namespace
+
+bool use_update(const std::string &path) {
+    auto id = peek_program_id(path);
+    auto game = id ? update_of(*id) : std::nullopt;
+    if (!game) return false;
+    update_override = {*game, path};
+    return true;
+}
+
+std::string update_for(uint64_t program_id) {
+    if (update_override.first == program_id) return update_override.second;
+    const Settings &s = settings();
+    auto it = s.updates.find(program_id);
+    std::error_code ec;
+    return it != s.updates.end() && std::filesystem::is_regular_file(it->second, ec) ? it->second : "";
+}
+
+std::string code_binary(const KnownDump &dump, bool updated) { return std::string(dump.binary) + (updated ? "_upd" : ""); }
+
+std::string code_binary(const KnownDump &dump) { return code_binary(dump, !update_for(dump.program_id).empty()); }
+
 bool module_available(const char *name) {
     std::error_code ec;
     return !game_code::linked() && std::filesystem::is_regular_file(game_code::module_path(name), ec);
@@ -45,14 +70,19 @@ Route route(const std::string &dump_path) {
     if (!id) return {Route::UNREADABLE};
     const KnownDump *d = find_dump(*id);
     if (!d) return {Route::UNKNOWN};
-    if (std::strcmp(d->binary, clockwork_binary) == 0 || module_available(d->binary)) return {Route::HERE, d};
-    return {binary_available(d->binary) ? Route::OTHER : Route::NOT_BUILT, d};
+    std::string b = code_binary(*d);
+    if (b == clockwork_binary || module_available(b.c_str())) return {Route::HERE, d, b};
+    return {binary_available(b.c_str()) ? Route::OTHER : Route::NOT_BUILT, d, b};
+}
+
+std::filesystem::path executable_for(const Route &r) {
+    return binary_path(r.kind == Route::HERE ? clockwork_binary : r.binary.c_str());
 }
 
 std::string route_problem(const Route &r) {
     char buf[256];
     switch (r.kind) {
-    case Route::UNREADABLE: return "That file isn't a decrypted .3ds, .cci or .cxi dump.";
+    case Route::UNREADABLE: return "That file isn't a decrypted .3ds, .cci, .cxi or .cia dump.";
     case Route::UNKNOWN: return "Clockwork doesn't recognize that game (or that region of it) yet.";
     case Route::NOT_BUILT: {
         const GameInfo *g = find_game(r.dump->game);

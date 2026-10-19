@@ -52,42 +52,64 @@ std::vector<uint8_t> blz_decompress(const std::vector<uint8_t> &in) {
     }
     return out;
 }
-} // namespace
 
-std::optional<uint64_t> peek_program_id(const std::filesystem::path &path) {
-    std::ifstream f(path, std::ios::binary);
+// where the game's NCCH starts: a .3ds/.cci's first partition, a .cxi's start, or a .cia's first
+// content; nullopt (and why) if there's none to read
+std::optional<uint64_t> find_ncch(std::istream &f, std::string *why) {
     uint8_t header[0x200];
-    if (!f.read(reinterpret_cast<char *>(header), sizeof header)) return std::nullopt;
-    uint64_t ncch = 0;
-    if (std::memcmp(header + 0x100, "NCSD", 4) == 0) ncch = uint64_t(u32(header + 0x120)) * MEDIA_UNIT;
-    else if (std::memcmp(header + 0x100, "NCCH", 4) != 0) return std::nullopt;
-    uint8_t h[0x200];
-    if (!f.seekg(std::streamoff(ncch)) || !f.read(reinterpret_cast<char *>(h), sizeof h)) return std::nullopt;
-    if (std::memcmp(h + 0x100, "NCCH", 4) != 0 || !(h[0x18F] & 0x4)) return std::nullopt;
-    uint64_t id;
-    std::memcpy(&id, h + 0x118, 8);
-    return id;
+    f.clear();
+    if (!f.seekg(0) || !f.read(reinterpret_cast<char *>(header), sizeof header)) return std::nullopt;
+    if (std::memcmp(header + 0x100, "NCSD", 4) == 0) return uint64_t(u32(header + 0x120)) * MEDIA_UNIT;
+    if (std::memcmp(header + 0x100, "NCCH", 4) == 0) return 0;
+    // CIA: header, certificates, ticket, TMD and contents, each 64-byte aligned
+    if (u32(header) != 0x2020) return std::nullopt;
+    auto align = [](uint64_t x) { return (x + 63) & ~uint64_t(63); };
+    uint64_t certs = align(0x2020), ticket = certs + align(u32(header + 8)), tmd = ticket + align(u32(header + 12));
+    uint64_t contents = tmd + align(u32(header + 16));
+    // the TMD's first content record says whether it's still encrypted (eShop/CDN copies are)
+    uint8_t sig[4];
+    if (!f.seekg(std::streamoff(tmd)) || !f.read(reinterpret_cast<char *>(sig), 4)) return std::nullopt;
+    uint32_t sig_type = uint32_t(sig[0]) << 24 | sig[1] << 16 | sig[2] << 8 | sig[3];
+    uint64_t sig_size = sig_type == 0x10003 ? 0x23C : sig_type == 0x10004 ? 0x13C : sig_type == 0x10005 ? 0x7C : 0;
+    if (!sig_size) return std::nullopt;
+    uint8_t record[16];
+    if (!f.seekg(std::streamoff(tmd + 4 + sig_size + 0xC4 + 64 * 0x24)) || !f.read(reinterpret_cast<char *>(record), 16))
+        return std::nullopt;
+    if (record[7] & 1) { // content type: encrypted
+        if (why) *why = "this .cia is encrypted; decrypt it with GodMode9 (Decrypt file) first";
+        return std::nullopt;
+    }
+    return contents;
 }
 
-Dump::Dump(const std::filesystem::path &path) : file_(path, std::ios::binary) {
-    if (!file_) fatal("could not open the game dump %s", path.string().c_str());
+// An NCCH's program id, exheader, decompressed .code and RomFS (IVFC level 3) location
+struct Ncch {
+    uint64_t program_id = 0;
+    std::vector<uint8_t> exheader, code;
+    uint64_t romfs_offset = 0, romfs_size = 0;
+};
 
-    uint8_t header[0x200];
-    read_at(0, header, sizeof header);
-    uint64_t ncch = 0;
-    if (std::memcmp(header + 0x100, "NCSD", 4) == 0) {
-        ncch = uint64_t(u32(header + 0x120)) * MEDIA_UNIT; // partition 0: the game
-    } else if (std::memcmp(header + 0x100, "NCCH", 4) != 0) {
-        fatal("%s is not a .3ds/.cci or .cxi dump", path.string().c_str());
-    }
+Ncch read_ncch(std::ifstream &file, const std::filesystem::path &path) {
+    auto read_at = [&](uint64_t offset, void *out, uint64_t size) {
+        file.clear();
+        file.seekg(std::streamoff(offset));
+        file.read(static_cast<char *>(out), std::streamsize(size));
+        if (uint64_t(file.gcount()) != size)
+            fatal("%s is truncated (read at %#llx)", path.string().c_str(), (unsigned long long)offset);
+    };
+    std::string why;
+    auto at = find_ncch(file, &why);
+    if (!at) fatal("%s: %s", path.string().c_str(), why.empty() ? "not a .3ds/.cci, .cxi or .cia dump" : why.c_str());
+    uint64_t ncch = *at;
     uint8_t h[0x200];
     read_at(ncch, h, sizeof h);
-    if (std::memcmp(h + 0x100, "NCCH", 4) != 0) fatal("dump has no NCCH partition");
-    if (!(h[0x18F] & 0x4)) fatal("the dump is encrypted; decrypt it with GodMode9 first");
-    std::memcpy(&program_id_, h + 0x118, 8);
+    if (std::memcmp(h + 0x100, "NCCH", 4) != 0) fatal("%s has no NCCH partition", path.string().c_str());
+    if (!(h[0x18F] & 0x4)) fatal("%s is encrypted; decrypt it with GodMode9 first", path.string().c_str());
+    Ncch n;
+    std::memcpy(&n.program_id, h + 0x118, 8);
 
-    exheader_.resize(0x400);
-    read_at(ncch + 0x200, exheader_.data(), 0x400);
+    n.exheader.resize(0x400);
+    read_at(ncch + 0x200, n.exheader.data(), 0x400);
 
     // ExeFS: find .code
     uint64_t exefs = ncch + uint64_t(u32(h + 0x1A0)) * MEDIA_UNIT;
@@ -98,25 +120,84 @@ Dump::Dump(const std::filesystem::path &path) : file_(path, std::ios::binary) {
         if (std::strncmp(reinterpret_cast<const char *>(e), ".code", 8) != 0) continue;
         std::vector<uint8_t> packed(u32(e + 12));
         read_at(exefs + 0x200 + u32(e + 8), packed.data(), packed.size());
-        bool compressed = exheader_[0xD] & 1;
-        code_ = compressed ? blz_decompress(packed) : std::move(packed);
+        bool compressed = n.exheader[0xD] & 1;
+        n.code = compressed ? blz_decompress(packed) : std::move(packed);
     }
-    if (code_.empty()) fatal("dump has no .code");
+    if (n.code.empty()) fatal("%s has no .code", path.string().c_str());
 
     // RomFS: skip the IVFC header to level 3, which is what the game reads
     uint64_t romfs = ncch + uint64_t(u32(h + 0x1B0)) * MEDIA_UNIT;
     uint64_t romfs_total = uint64_t(u32(h + 0x1B4)) * MEDIA_UNIT;
+    if (!romfs_total) return n;
     uint8_t ivfc[0x60];
     read_at(romfs, ivfc, sizeof ivfc);
-    if (std::memcmp(ivfc, "IVFC", 4) != 0) fatal("dump has no RomFS");
+    if (std::memcmp(ivfc, "IVFC", 4) != 0) fatal("%s's RomFS doesn't read", path.string().c_str());
     uint64_t master_hash = u32(ivfc + 0x08), block = uint64_t(1) << u32(ivfc + 0x4C);
     uint64_t level3 = (0x60 + master_hash + block - 1) / block * block;
     uint64_t level3_size;
     std::memcpy(&level3_size, ivfc + 0x44, 8);
-    romfs_offset_ = romfs + level3;
-    romfs_size_ = std::min(level3_size, romfs_total - level3);
+    n.romfs_offset = romfs + level3;
+    n.romfs_size = std::min(level3_size, romfs_total - level3);
+    return n;
+}
+} // namespace
+
+struct Dump::Update {
+    std::ifstream file;
+    std::mutex lock;
+    uint64_t romfs_offset = 0, romfs_size = 0;
+};
+
+std::optional<uint64_t> peek_program_id(const std::filesystem::path &path) {
+    std::ifstream f(path, std::ios::binary);
+    auto ncch = find_ncch(f, nullptr);
+    if (!ncch) return std::nullopt;
+    uint8_t h[0x200];
+    f.clear();
+    if (!f.seekg(std::streamoff(*ncch)) || !f.read(reinterpret_cast<char *>(h), sizeof h)) return std::nullopt;
+    if (std::memcmp(h + 0x100, "NCCH", 4) != 0 || !(h[0x18F] & 0x4)) return std::nullopt;
+    uint64_t id;
+    std::memcpy(&id, h + 0x118, 8);
+    return id;
+}
+
+Dump::Dump(const std::filesystem::path &path, const std::filesystem::path &update) : file_(path, std::ios::binary) {
+    if (!file_) fatal("could not open the game dump %s", path.string().c_str());
+    Ncch game = read_ncch(file_, path);
+    if (!game.romfs_size) fatal("dump has no RomFS");
+    program_id_ = game.program_id;
+    exheader_ = std::move(game.exheader), code_ = std::move(game.code);
+    romfs_offset_ = game.romfs_offset, romfs_size_ = game.romfs_size;
     LOG("dump: program %016llx, .code %#zx bytes, RomFS %.1f MiB", (unsigned long long)program_id_, code_.size(),
         double(romfs_size_) / (1 << 20));
+
+    if (update.empty()) return;
+    update_ = std::make_unique<Update>();
+    update_->file.open(update, std::ios::binary);
+    if (!update_->file) fatal("could not open the update %s", update.string().c_str());
+    Ncch u = read_ncch(update_->file, update);
+    if (update_of(u.program_id) != program_id_)
+        fatal("%s is the update of %016llx, not of this game (%016llx)", update.string().c_str(),
+              (unsigned long long)u.program_id, (unsigned long long)program_id_);
+    exheader_ = std::move(u.exheader), code_ = std::move(u.code); // the update's code runs
+    update_->romfs_offset = u.romfs_offset, update_->romfs_size = u.romfs_size;
+    LOG("dump: update %016llx, .code %#zx bytes, RomFS %.1f MiB", (unsigned long long)u.program_id, code_.size(),
+        double(u.romfs_size) / (1 << 20));
+}
+
+Dump::~Dump() = default;
+
+uint64_t Dump::update_romfs_size() const { return update_ ? update_->romfs_size : 0; }
+
+uint64_t Dump::read_update_romfs(uint64_t offset, void *out, uint64_t size) {
+    if (!update_ || offset >= update_->romfs_size) return 0;
+    size = std::min(size, update_->romfs_size - offset);
+    std::lock_guard lk(update_->lock);
+    std::ifstream &f = update_->file;
+    f.clear();
+    f.seekg(std::streamoff(update_->romfs_offset + offset));
+    f.read(static_cast<char *>(out), std::streamsize(size));
+    return uint64_t(f.gcount());
 }
 
 void Dump::read_at(uint64_t offset, void *out, uint64_t size) {
@@ -288,4 +369,6 @@ int Dump::apply_romfs_mod(const std::filesystem::path &dir) {
 
 Dump &dump() { return *instance; }
 
-void open_dump(const std::filesystem::path &path) { instance = std::make_unique<Dump>(path); }
+void open_dump(const std::filesystem::path &path, const std::filesystem::path &update) {
+    instance = std::make_unique<Dump>(path, update);
+}

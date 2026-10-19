@@ -1,5 +1,6 @@
 #include "autobuild.h"
 
+#include "dump.h"
 #include "game_code.h"
 #include "handoff.h"
 #include "log.h"
@@ -335,7 +336,7 @@ void build_executable(Run &r, const SourceTree &t, const std::string &binary,
     std::vector<fs::path> unpacked;
     for (auto &[id, path] : dumps) {
         fs::path out = t.root / "extracted" / hex_id(id);
-        r.step("Unpacking " + version_name(id));
+        r.step("Unpacking " + version_name(id) + (update_of(peek_program_id(path).value_or(0)) ? " (update)" : ""));
         if (!r.run(in_root + cargo + " run --release -p ctrx -- " + quote(path) + " " + quote(out.string())))
             return r.fail(binary, "Couldn't unpack " + path + ".");
         unpacked.push_back(out);
@@ -391,7 +392,7 @@ void build_module(Run &r, const Kit &k, const std::string &binary, const std::ve
     std::vector<fs::path> unpacked;
     for (auto &[id, path] : dumps) {
         fs::path out = work / hex_id(id);
-        r.step("Unpacking " + version_name(id));
+        r.step("Unpacking " + version_name(id) + (update_of(peek_program_id(path).value_or(0)) ? " (update)" : ""));
         if (!r.run(quote(k.ctrx.string()) + " --code-only " + quote(path) + " " + quote(out.string())))
             return r.fail(binary, "Couldn't unpack " + path + ".");
         unpacked.push_back(out);
@@ -471,13 +472,14 @@ bool can_build_games(std::string *why) {
 
 bool needs_build(const KnownDump &dump) {
     const Builder &b = builder();
+    std::string binary = code_binary(dump);
     if (b.kit) {
-        auto ids = read_marker(module_marker(dump.binary), true);
-        return !module_available(dump.binary) || !ids || !ids->count(dump.program_id);
+        auto ids = read_marker(module_marker(binary), true);
+        return !module_available(binary.c_str()) || !ids || !ids->count(dump.program_id);
     }
-    if (!binary_available(dump.binary)) return true;
+    if (!binary_available(binary.c_str())) return true;
     if (!b.tree) return false;
-    auto ids = read_marker(marker(*b.tree, dump.binary), false);
+    auto ids = read_marker(marker(*b.tree, binary), false);
     return ids && !ids->count(dump.program_id);
 }
 

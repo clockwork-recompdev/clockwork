@@ -10,6 +10,9 @@ namespace platform {
 std::filesystem::path data_dir();
 // a game's own data (its save, secure values) in the data folder: games/<program id>
 std::filesystem::path game_dir(uint64_t program_id);
+// where the games' own state lives (saves under games/, extdata, the SD card, StreetPass): the data
+// folder, or YW2_STATE_DIR (a title capture's throwaway folder, so it never touches real saves)
+std::filesystem::path state_dir();
 // which of the Clockwork processes running at once this is (0 for the first): a lock held for the
 // process's life. Two windows on one PC playing together are told apart by it
 int instance_slot();

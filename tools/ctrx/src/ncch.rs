@@ -5,7 +5,8 @@ use crate::util::{u32_at, u64_at};
 pub const MEDIA_UNIT: u64 = 0x200;
 
 /// Byte range of partition 0 (the game's executable content) inside a
-/// `.3ds`/`.cci`, or the whole file for a bare `.cxi`.
+/// `.3ds`/`.cci`, the whole file for a bare `.cxi`, or a decrypted `.cia`'s
+/// first content (an update's, as GodMode9's "Decrypt file" writes it).
 pub fn main_partition(data: &[u8]) -> Result<(usize, usize), String> {
     if data.len() >= 0x200 && &data[0x100..0x104] == b"NCSD" {
         let offset = u32_at(data, 0x120) as u64 * MEDIA_UNIT;
@@ -17,12 +18,41 @@ pub fn main_partition(data: &[u8]) -> Result<(usize, usize), String> {
         Ok((start, end))
     } else if data.len() >= 0x200 && &data[0x100..0x104] == b"NCCH" {
         Ok((0, data.len()))
-    } else if data.len() >= 4 && u32_at(data, 0) == 0x2020 {
-        // CIA header size field
-        Err("this looks like a CIA; convert it to .3ds/.cxi with GodMode9 first".into())
+    } else if data.len() >= 0x20 && u32_at(data, 0) == 0x2020 {
+        cia_content(data)
     } else {
         Err("not an NCSD (.3ds/.cci) or NCCH (.cxi) image".into())
     }
+}
+
+/// A CIA's first content: header, certificates, ticket and TMD come first, each
+/// 64-byte aligned. Its TMD record says whether the content is still encrypted
+fn cia_content(data: &[u8]) -> Result<(usize, usize), String> {
+    let align = |x: u64| (x + 63) & !63;
+    let certs = align(0x2020);
+    let ticket = certs + align(u32_at(data, 8) as u64);
+    let tmd = ticket + align(u32_at(data, 12) as u64);
+    let contents = tmd + align(u32_at(data, 16) as u64);
+    let be32 = |at: usize| -> Result<u32, String> {
+        data.get(at..at + 4).map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]])).ok_or("CIA is truncated".to_string())
+    };
+    let sig = match be32(tmd as usize)? {
+        0x10003 => 0x23C,
+        0x10004 => 0x13C,
+        0x10005 => 0x7C,
+        t => return Err(format!("CIA: unknown TMD signature type {t:#x}")),
+    };
+    let record = tmd as usize + 4 + sig + 0xC4 + 64 * 0x24;
+    let flags = be32(record + 4)?;
+    if flags & 1 != 0 {
+        return Err("this .cia is encrypted; decrypt it with GodMode9 (Decrypt file) first".into());
+    }
+    let size = (be32(record + 8)? as u64) << 32 | be32(record + 12)? as u64;
+    let (start, end) = (contents as usize, (contents + size) as usize);
+    if end > data.len() {
+        return Err("CIA content extends past end of file (truncated?)".into());
+    }
+    Ok((start, end))
 }
 
 pub struct Region {

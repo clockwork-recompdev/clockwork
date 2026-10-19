@@ -1,6 +1,7 @@
 // The launcher: shown in the game window before the game starts. Lists the games, picks the
 // dump, and edits display, controls and audio settings; Play saves them and starts the game.
 #include "launcher.h"
+#include "menu_music.h"
 
 #include "autobuild.h"
 #include "dump.h"
@@ -62,20 +63,32 @@ bool dump_exists(const std::string &path) {
     return !path.empty() && std::filesystem::is_regular_file(path, ec);
 }
 
-// looks in `folder` (not below it) for dumps Clockwork recognizes, and remembers them
+// remembers `path` if it's a dump Clockwork recognizes, or an update of one; true if so
+bool remember(Settings &s, const std::string &path) {
+    auto id = peek_program_id(path);
+    if (!id) return false;
+    if (auto game = update_of(*id); game && find_dump(*game)) return s.updates[*game] = path, true;
+    if (!find_dump(*id)) return false;
+    s.dumps[*id] = path;
+    return true;
+}
+
+// looks in `folder` (not below it) for dumps Clockwork recognizes and their updates, and remembers them
 void find_dumps(Settings &s, const std::filesystem::path &folder) {
     std::error_code ec;
     for (auto &e : std::filesystem::directory_iterator(folder, ec)) {
         std::string ext = e.path().extension().string();
         for (char &c : ext) c = char(std::tolower(static_cast<unsigned char>(c)));
-        if ((ext != ".3ds" && ext != ".cci" && ext != ".cxi") || !e.is_regular_file(ec)) continue;
-        if (auto id = peek_program_id(e.path()); id && find_dump(*id)) s.dumps[*id] = e.path().string();
+        if ((ext != ".3ds" && ext != ".cci" && ext != ".cxi" && ext != ".cia" && ext != ".ncch") || !e.is_regular_file(ec))
+            continue;
+        remember(s, e.path().string());
     }
 }
 
 // forgets dumps that are gone, and finds new ones next to the ones known
 void refresh_dumps(Settings &s) {
     for (auto it = s.dumps.begin(); it != s.dumps.end();) it = dump_exists(it->second) ? std::next(it) : s.dumps.erase(it);
+    for (auto it = s.updates.begin(); it != s.updates.end();) it = dump_exists(it->second) ? std::next(it) : s.updates.erase(it);
     std::set<std::filesystem::path> folders;
     if (!s.dump_folder.empty()) folders.insert(s.dump_folder);
     if (dump_exists(s.game_path)) folders.insert(std::filesystem::path(s.game_path).parent_path());
@@ -97,111 +110,303 @@ struct Capture {
     bool pad = false;
 };
 
-// Yo-kai Watch's colors: white, with a strong blue
-const ImVec4 BLUE = {0.12f, 0.45f, 0.85f, 1}, BLUE_DARK = {0.06f, 0.25f, 0.56f, 1}, BLUE_LIGHT = {0.62f, 0.82f, 0.99f, 1};
-const ImVec4 BACKGROUND = {0.96f, 0.975f, 1.0f, 1}, PANEL = {1, 1, 1, 1}, PANEL_HOVER = {0.90f, 0.95f, 1.0f, 1};
-const ImVec4 TEXT = {0.08f, 0.14f, 0.26f, 1}, TEXT_DIM = {0.42f, 0.49f, 0.60f, 1}, BORDER = {0.80f, 0.87f, 0.95f, 1};
-const ImVec4 WHITE = {1, 1, 1, 1}, WARN = {0.85f, 0.45f, 0.05f, 1};
+// The look of Yo-kai Watch Blasters' version select (Red Cat Corps / Moon Rabbit Crew): deep blue
+// scanlines with a light band across, angled panels, cards with thick bevelled borders, and bars
+// with pointed ends ("VIP Link") lettered in heavy outlined italics. Nothing from the game is used:
+// it's all drawn here.
+const ImVec4 NAVY = {0.07f, 0.13f, 0.47f, 1}, NAVY_DARK = {0.03f, 0.06f, 0.27f, 1}, ROYAL = {0.14f, 0.30f, 0.80f, 1};
+const ImVec4 CYAN = {0.38f, 0.82f, 1.0f, 1}, EDGE = {0.56f, 0.76f, 1.0f, 1};
+const ImVec4 GOLD = {1.0f, 0.80f, 0.10f, 1}, GOLD_LIGHT = {1.0f, 0.94f, 0.50f, 1}, ORANGE = {1.0f, 0.56f, 0.06f, 1};
+const ImVec4 LILAC = {0.80f, 0.74f, 0.99f, 1}, LILAC_DARK = {0.52f, 0.43f, 0.90f, 1}, RED = {0.88f, 0.13f, 0.13f, 1};
+const ImVec4 SLATE = {0.55f, 0.60f, 0.76f, 1};
+// the names the rest of the launcher uses
+const ImVec4 BLUE = CYAN, BLUE_DARK = NAVY_DARK, BLUE_LIGHT = EDGE;
+const ImVec4 BACKGROUND = NAVY_DARK, PANEL = {0.05f, 0.10f, 0.36f, 0.88f}, PANEL_HOVER = {0.10f, 0.20f, 0.56f, 0.95f};
+const ImVec4 TEXT = {1, 1, 1, 1}, TEXT_DIM = {0.70f, 0.80f, 1.0f, 1}, BORDER = {0.56f, 0.76f, 1.0f, 0.55f};
+const ImVec4 WHITE = {1, 1, 1, 1}, WARN = {1.0f, 0.70f, 0.25f, 1};
 
 ImVec4 mix(ImVec4 a, ImVec4 b, float t) {
     return {a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, a.z + (b.z - a.z) * t, a.w + (b.w - a.w) * t};
 }
+ImVec4 alpha(ImVec4 c, float a) { return {c.x, c.y, c.z, a}; }
 
 ImU32 col(ImVec4 c) { return ImGui::GetColorU32(c); }
 
-void apply_theme(ImGuiStyle &style) {
-    ImGui::StyleColorsLight(&style);
-    style.WindowRounding = 0, style.ChildRounding = 6, style.FrameRounding = 6, style.PopupRounding = 6;
-    style.GrabRounding = 6, style.TabRounding = 6, style.ScrollbarRounding = 6;
-    style.WindowPadding = {14, 12}, style.FramePadding = {8, 5}, style.ItemSpacing = {8, 6};
-    style.WindowBorderSize = 0, style.FrameBorderSize = 1, style.TabBarBorderSize = 2, style.SeparatorTextBorderSize = 1;
-    ImVec4 *c = style.Colors;
-    c[ImGuiCol_Text] = TEXT, c[ImGuiCol_TextDisabled] = TEXT_DIM;
-    c[ImGuiCol_WindowBg] = c[ImGuiCol_PopupBg] = BACKGROUND, c[ImGuiCol_ChildBg] = {0, 0, 0, 0};
-    c[ImGuiCol_Border] = BORDER, c[ImGuiCol_Separator] = BORDER;
-    c[ImGuiCol_FrameBg] = PANEL, c[ImGuiCol_FrameBgHovered] = PANEL_HOVER, c[ImGuiCol_FrameBgActive] = mix(PANEL_HOVER, BLUE, 0.15f);
-    c[ImGuiCol_Button] = PANEL, c[ImGuiCol_ButtonHovered] = PANEL_HOVER, c[ImGuiCol_ButtonActive] = mix(PANEL_HOVER, BLUE, 0.25f);
-    c[ImGuiCol_Header] = mix(PANEL, BLUE, 0.12f), c[ImGuiCol_HeaderHovered] = mix(PANEL, BLUE, 0.2f);
-    c[ImGuiCol_HeaderActive] = mix(PANEL, BLUE, 0.3f);
-    c[ImGuiCol_Tab] = PANEL, c[ImGuiCol_TabHovered] = PANEL_HOVER;
-    c[ImGuiCol_TabSelected] = BLUE, c[ImGuiCol_TabSelectedOverline] = BLUE_DARK;
-    c[ImGuiCol_TabDimmed] = PANEL, c[ImGuiCol_TabDimmedSelected] = mix(PANEL, BLUE, 0.5f);
-    c[ImGuiCol_CheckMark] = BLUE, c[ImGuiCol_SliderGrab] = BLUE, c[ImGuiCol_SliderGrabActive] = BLUE_DARK;
-    c[ImGuiCol_TableHeaderBg] = PANEL_HOVER, c[ImGuiCol_TableRowBg] = PANEL, c[ImGuiCol_TableRowBgAlt] = mix(PANEL, BACKGROUND, 0.8f);
-    c[ImGuiCol_TableBorderLight] = BORDER;
-    c[ImGuiCol_ScrollbarBg] = {0, 0, 0, 0}, c[ImGuiCol_ScrollbarGrab] = BORDER;
-    c[ImGuiCol_NavCursor] = BLUE, c[ImGuiCol_TextSelectedBg] = mix(PANEL, BLUE, 0.3f);
+// the heavy italic for titles and buttons (a system font: see load_fonts); null: the body font
+ImFont *display_font = nullptr;
+
+// fonts from the system: a bold one for text and a black italic one for titles and buttons, the
+// nearest to the games' lettering that every PC has. ImGui's own font if none is found
+void load_fonts(ImGuiIO &io) {
+    static const char *BODY[] = {
+#if defined(_WIN32)
+        "C:\\Windows\\Fonts\\seguisb.ttf", "C:\\Windows\\Fonts\\segoeuib.ttf", "C:\\Windows\\Fonts\\arialbd.ttf",
+#elif defined(__APPLE__)
+        "/System/Library/Fonts/Supplemental/Arial Rounded Bold.ttf", "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+#else
+        "/usr/share/fonts/noto/NotoSans-Bold.ttf", "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
+        "/usr/share/fonts/google-noto/NotoSans-Bold.ttf", "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
+#endif
+    };
+    static const char *DISPLAY[] = {
+#if defined(_WIN32)
+        "C:\\Windows\\Fonts\\seguibli.ttf", "C:\\Windows\\Fonts\\seguibl.ttf", "C:\\Windows\\Fonts\\ariblk.ttf",
+#elif defined(__APPLE__)
+        "/System/Library/Fonts/Supplemental/Arial Rounded Bold.ttf", "/System/Library/Fonts/Supplemental/Arial Black.ttf",
+#else
+        "/usr/share/fonts/noto/NotoSans-BlackItalic.ttf", "/usr/share/fonts/truetype/noto/NotoSans-BlackItalic.ttf",
+        "/usr/share/fonts/google-noto/NotoSans-BlackItalic.ttf", "/usr/share/fonts/noto/NotoSans-Black.ttf",
+        "/usr/share/fonts/TTF/DejaVuSans-BoldOblique.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans-BoldOblique.ttf",
+#endif
+    };
+    auto first = [](const char *const *list, size_t n) -> const char * {
+        std::error_code ec;
+        for (size_t i = 0; i < n; i++)
+            if (std::filesystem::is_regular_file(list[i], ec)) return list[i];
+        return nullptr;
+    };
+    if (const char *body = first(BODY, std::size(BODY))) io.FontDefault = io.Fonts->AddFontFromFileTTF(body, 15.0f);
+    if (!io.FontDefault) io.FontDefault = io.Fonts->AddFontDefault();
+    if (const char *disp = first(DISPLAY, std::size(DISPLAY))) display_font = io.Fonts->AddFontFromFileTTF(disp, 15.0f);
+    if (!display_font) display_font = io.FontDefault;
 }
 
+void apply_theme(ImGuiStyle &style) {
+    ImGui::StyleColorsDark(&style);
+    style.WindowRounding = 0, style.ChildRounding = 10, style.FrameRounding = 10, style.PopupRounding = 10;
+    style.GrabRounding = 10, style.TabRounding = 10, style.ScrollbarRounding = 10;
+    style.WindowPadding = {16, 12}, style.FramePadding = {10, 6}, style.ItemSpacing = {10, 7};
+    style.WindowBorderSize = 0, style.FrameBorderSize = 1.5f, style.PopupBorderSize = 2, style.SeparatorTextBorderSize = 2;
+    style.ScrollbarSize = 12;
+    ImVec4 *c = style.Colors;
+    c[ImGuiCol_Text] = TEXT, c[ImGuiCol_TextDisabled] = TEXT_DIM;
+    c[ImGuiCol_WindowBg] = {0, 0, 0, 0}, c[ImGuiCol_ChildBg] = {0, 0, 0, 0}, c[ImGuiCol_PopupBg] = alpha(NAVY_DARK, 0.97f);
+    c[ImGuiCol_Border] = BORDER, c[ImGuiCol_Separator] = BORDER;
+    c[ImGuiCol_FrameBg] = PANEL, c[ImGuiCol_FrameBgHovered] = PANEL_HOVER, c[ImGuiCol_FrameBgActive] = mix(PANEL_HOVER, ROYAL, 0.5f);
+    c[ImGuiCol_Button] = LILAC_DARK, c[ImGuiCol_ButtonHovered] = mix(LILAC_DARK, LILAC, 0.45f);
+    c[ImGuiCol_ButtonActive] = mix(LILAC_DARK, NAVY, 0.3f);
+    c[ImGuiCol_Header] = alpha(CYAN, 0.30f), c[ImGuiCol_HeaderHovered] = alpha(CYAN, 0.42f), c[ImGuiCol_HeaderActive] = alpha(CYAN, 0.55f);
+    c[ImGuiCol_CheckMark] = GOLD, c[ImGuiCol_SliderGrab] = GOLD, c[ImGuiCol_SliderGrabActive] = ORANGE;
+    c[ImGuiCol_TableHeaderBg] = alpha(ROYAL, 0.8f), c[ImGuiCol_TableRowBg] = alpha(NAVY_DARK, 0.55f);
+    c[ImGuiCol_TableRowBgAlt] = alpha(NAVY, 0.55f), c[ImGuiCol_TableBorderLight] = BORDER;
+    c[ImGuiCol_ScrollbarBg] = {0, 0, 0, 0}, c[ImGuiCol_ScrollbarGrab] = alpha(EDGE, 0.5f);
+    c[ImGuiCol_ScrollbarGrabHovered] = alpha(EDGE, 0.7f), c[ImGuiCol_ScrollbarGrabActive] = EDGE;
+    c[ImGuiCol_NavCursor] = GOLD, c[ImGuiCol_TextSelectedBg] = alpha(CYAN, 0.35f);
+    c[ImGuiCol_ModalWindowDimBg] = alpha(NAVY_DARK, 0.6f);
+}
+
+// text with a thick outline and a drop shadow, like the games' lettering
+void outlined_text(ImDrawList *dl, float size, ImVec2 p, ImU32 fill, ImU32 outline, const char *text, ImFont *font = nullptr) {
+    float o = std::max(1.0f, size * 0.085f);
+    dl->AddText(font, size, {p.x + o * 0.6f, p.y + o * 1.6f}, outline, text); // shadow
+    constexpr int STEPS = 12;
+    for (int i = 0; i < STEPS; i++) {
+        float a = 6.2831853f * float(i) / STEPS;
+        dl->AddText(font, size, {p.x + std::cos(a) * o, p.y + std::sin(a) * o}, outline, text);
+    }
+    dl->AddText(font, size, p, fill, text);
+}
+
+ImVec2 display_size(float size, const char *text) {
+    ImFont *f = display_font ? display_font : ImGui::GetFont();
+    return f->CalcTextSizeA(size, FLT_MAX, 0, text);
+}
+
+// the backdrop: deep blue scanlines, a light band across, and the top screen's orange sunburst
+// showing at both edges
+void draw_backdrop(ImDrawList *dl, ImVec2 a, ImVec2 b, float unit) {
+    dl->AddRectFilledMultiColor(a, b, col(NAVY), col(NAVY), col(NAVY_DARK), col(NAVY_DARK));
+    float h = b.y - a.y, band = a.y + h * 0.58f, bh = h * 0.16f;
+    dl->AddRectFilledMultiColor({a.x, band - bh}, {b.x, band}, col(alpha(CYAN, 0)), col(alpha(CYAN, 0)),
+                                col(alpha(CYAN, 0.30f)), col(alpha(CYAN, 0.30f)));
+    dl->AddRectFilledMultiColor({a.x, band}, {b.x, band + bh}, col(alpha(CYAN, 0.30f)), col(alpha(CYAN, 0.30f)),
+                                col(alpha(CYAN, 0)), col(alpha(CYAN, 0)));
+    for (float y = a.y; y < b.y; y += unit * 0.42f) // scanlines
+        dl->AddRectFilled({a.x, y}, {b.x, y + unit * 0.14f}, col(alpha(ROYAL, 0.22f)));
+    float side = unit * 1.6f;
+    for (int s = 0; s < 2; s++) { // the sunburst strips
+        float x0 = s ? b.x - side : a.x, x1 = s ? b.x : a.x + side;
+        dl->AddRectFilledMultiColor({x0, a.y}, {x1, b.y}, col(GOLD_LIGHT), col(GOLD_LIGHT), col(ORANGE), col(ORANGE));
+        dl->PushClipRect({x0, a.y}, {x1, b.y}, true);
+        for (float y = a.y - side; y < b.y + side; y += unit * 0.9f)
+            dl->AddQuadFilled({x0, y}, {x1, y - side * 0.6f}, {x1, y - side * 0.6f + unit * 0.35f}, {x0, y + unit * 0.35f},
+                              col(alpha(WHITE, 0.28f)));
+        dl->PopClipRect();
+        float edge = s ? x0 : x1; // a dark line where the blue starts
+        dl->AddLine({edge, a.y}, {edge, b.y}, col(NAVY_DARK), unit * 0.12f);
+    }
+}
+
+// a panel with its corners cut off, filled and outlined
+void chamfer_panel(ImDrawList *dl, ImVec2 a, ImVec2 b, float cut, ImU32 fill, ImU32 edge, float thick) {
+    ImVec2 pts[8] = {{a.x + cut, a.y}, {b.x - cut, a.y}, {b.x, a.y + cut}, {b.x, b.y - cut},
+                     {b.x - cut, b.y}, {a.x + cut, b.y}, {a.x, b.y - cut}, {a.x, a.y + cut}};
+    dl->AddConvexPolyFilled(pts, 8, fill);
+    dl->AddPolyline(pts, 8, edge, ImDrawFlags_Closed, thick);
+}
+
+// The games' buttons: a bar with pointed ends, a white rim, two tones and outlined lettering
+struct Palette {
+    ImVec4 light, dark, rim, outline;
+};
+const Palette LILAC_BAR{LILAC, LILAC_DARK, WHITE, {0.22f, 0.14f, 0.50f, 1}};
+const Palette GOLD_BAR{GOLD_LIGHT, ORANGE, WHITE, {0.50f, 0.20f, 0.02f, 1}};
+const Palette CYAN_BAR{{0.62f, 0.92f, 1, 1}, {0.12f, 0.58f, 0.95f, 1}, WHITE, {0.03f, 0.18f, 0.48f, 1}};
+const Palette NAVY_BAR{{0.24f, 0.40f, 0.88f, 1}, {0.09f, 0.18f, 0.56f, 1}, EDGE, {0.03f, 0.06f, 0.27f, 1}};
+const Palette OFF_BAR{{0.62f, 0.66f, 0.80f, 1}, {0.38f, 0.42f, 0.58f, 1}, {0.80f, 0.84f, 0.92f, 1}, {0.15f, 0.18f, 0.30f, 1}};
+
+void bar_points(ImVec2 a, ImVec2 b, float inset, ImVec2 *pts) {
+    float h = b.y - a.y, k = h * 0.38f, my = (a.y + b.y) / 2, ki = inset * 0.5f; // the points' depth
+    pts[0] = {a.x + k + ki, a.y + inset}, pts[1] = {b.x - k - ki, a.y + inset}, pts[2] = {b.x - inset, my};
+    pts[3] = {b.x - k - ki, b.y - inset}, pts[4] = {a.x + k + ki, b.y - inset}, pts[5] = {a.x + inset, my};
+}
+
+void draw_bar(ImDrawList *dl, ImVec2 a, ImVec2 b, Palette p, bool hot) {
+    if (hot) p.light = mix(p.light, WHITE, 0.25f), p.dark = mix(p.dark, WHITE, 0.18f);
+    float h = b.y - a.y, rim = std::max(2.0f, h * 0.09f);
+    ImVec2 o[6], in[6];
+    bar_points({a.x, a.y + h * 0.06f}, {b.x, b.y + h * 0.06f}, 0, o); // shadow
+    dl->AddConvexPolyFilled(o, 6, col(alpha(NAVY_DARK, 0.55f)));
+    bar_points(a, b, 0, o);
+    dl->AddConvexPolyFilled(o, 6, col(p.rim));
+    dl->AddPolyline(o, 6, col(alpha(p.outline, 0.8f)), ImDrawFlags_Closed, std::max(1.0f, rim * 0.45f));
+    bar_points(a, b, rim, in);
+    dl->AddConvexPolyFilled(in, 6, col(p.dark));
+    // the upper half lighter, like the games' glossy buttons
+    ImVec2 upper[4] = {in[0], in[1], in[2], in[5]};
+    dl->AddConvexPolyFilled(upper, 4, col(p.light));
+    dl->AddLine({in[0].x + rim, in[0].y + rim * 0.8f}, {in[1].x - rim, in[1].y + rim * 0.8f}, col(alpha(WHITE, 0.55f)), rim * 0.5f);
+}
+
+// a button shaped like the games': `label` up to "##" is shown, outlined
+bool bar_button(const char *label, ImVec2 size, const Palette &p, bool enabled = true, bool selected = false) {
+    ImVec2 at = ImGui::GetCursorScreenPos();
+    bool clicked = ImGui::InvisibleButton(label, size) && enabled;
+    bool hovered = enabled && ImGui::IsItemHovered(), held = enabled && ImGui::IsItemActive();
+    if (hovered) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+    ImDrawList *dl = ImGui::GetWindowDrawList();
+    float press = held ? size.y * 0.05f : 0;
+    ImVec2 a{at.x, at.y + press}, b{at.x + size.x, at.y + size.y + press};
+    const Palette &use = enabled ? p : OFF_BAR;
+    if (selected) draw_bar(dl, {a.x - 3, a.y - 3}, {b.x + 3, b.y + 3}, {GOLD, GOLD, GOLD, GOLD}, false);
+    draw_bar(dl, a, b, use, hovered);
+    const char *hidden = std::strstr(label, "##");
+    std::string text = hidden ? std::string(label, hidden) : std::string(label);
+    float fs = size.y * 0.46f;
+    ImVec2 ts = display_size(fs, text.c_str());
+    float room = size.x - size.y * 0.9f; // inside the points
+    if (ts.x > room && ts.x > 0) fs *= room / ts.x, ts = display_size(fs, text.c_str());
+    outlined_text(dl, fs, {a.x + (size.x - ts.x) / 2, a.y + (size.y - ts.y) / 2 - fs * 0.04f}, col(WHITE),
+                  col(enabled ? use.outline : OFF_BAR.outline), text.c_str(), display_font);
+    return clicked;
+}
+
+// a section's title: a cyan chip with the outlined title, and a line on along the panel
 void section(const char *title) {
     ImGui::Spacing();
-    ImGui::PushStyleColor(ImGuiCol_Text, BLUE);
-    ImGui::SeparatorText(title);
-    ImGui::PopStyleColor();
+    ImDrawList *dl = ImGui::GetWindowDrawList();
+    float h = ImGui::GetFrameHeight() * 0.95f, fs = h * 0.55f;
+    ImVec2 ts = display_size(fs, title), p = ImGui::GetCursorScreenPos();
+    float w = ts.x + h * 1.4f;
+    draw_bar(dl, p, {p.x + w, p.y + h}, CYAN_BAR, false);
+    outlined_text(dl, fs, {p.x + (w - ts.x) / 2, p.y + (h - ts.y) / 2}, col(WHITE), col(CYAN_BAR.outline), title, display_font);
+    float x1 = p.x + ImGui::GetContentRegionAvail().x;
+    dl->AddLine({p.x + w + h * 0.2f, p.y + h / 2}, {x1, p.y + h / 2}, col(alpha(EDGE, 0.55f)), 2);
+    ImGui::Dummy({w, h});
+    ImGui::Spacing();
 }
 
 // the logo: a clock face inside a gear, hands at ten past ten
 void draw_logo(ImDrawList *dl, ImVec2 c, float r) {
-    const ImU32 rim = col(WHITE), face = col(BLUE), mark = col(BLUE_LIGHT), hands = col(WHITE);
+    const ImU32 rim = col(WHITE), face = col(ROYAL), mark = col(EDGE), hands = col(WHITE);
     constexpr int TEETH = 10;
     constexpr float PI = 3.14159265f;
+    dl->AddCircleFilled({c.x, c.y + r * 0.08f}, r * 0.98f, col(alpha(NAVY_DARK, 0.6f)), 48); // shadow
     for (int i = 0; i < TEETH; i++) { // trapezoid teeth around the rim
         float a = 2 * PI * float(i) / TEETH, wo = PI / TEETH * 0.45f, wi = PI / TEETH * 0.7f;
         auto at = [&](float ang, float rad) { return ImVec2{c.x + std::cos(ang) * rad, c.y + std::sin(ang) * rad}; };
         dl->AddQuadFilled(at(a - wi, r * 0.8f), at(a - wo, r), at(a + wo, r), at(a + wi, r * 0.8f), rim);
     }
     dl->AddCircleFilled(c, r * 0.84f, rim, 48);
-    dl->AddCircleFilled(c, r * 0.66f, face, 48);
+    dl->AddCircleFilled(c, r * 0.68f, col(GOLD), 48);
+    dl->AddCircleFilled(c, r * 0.6f, face, 48);
     for (int i = 0; i < 12; i++) { // hour marks
         float a = 2 * PI * float(i) / 12, len = i % 3 == 0 ? 0.16f : 0.08f;
         ImVec2 o{std::cos(a), std::sin(a)};
-        dl->AddLine({c.x + o.x * r * (0.58f - len), c.y + o.y * r * (0.58f - len)}, {c.x + o.x * r * 0.58f, c.y + o.y * r * 0.58f},
+        dl->AddLine({c.x + o.x * r * (0.54f - len), c.y + o.y * r * (0.54f - len)}, {c.x + o.x * r * 0.54f, c.y + o.y * r * 0.54f},
                     i % 3 == 0 ? hands : mark, std::max(1.0f, r * 0.05f));
     }
     auto hand = [&](float hours_angle, float len, float width) {
         float a = hours_angle - PI / 2;
         dl->AddLine(c, {c.x + std::cos(a) * r * len, c.y + std::sin(a) * r * len}, hands, width);
     };
-    hand(2 * PI * 10.17f / 12, 0.32f, std::max(1.5f, r * 0.09f)); // hour hand at 10
-    hand(2 * PI * 2 / 12, 0.48f, std::max(1.0f, r * 0.06f));     // minute hand at 2
-    dl->AddCircleFilled(c, r * 0.08f, hands, 16);
+    hand(2 * PI * 10.17f / 12, 0.30f, std::max(1.5f, r * 0.09f)); // hour hand at 10
+    hand(2 * PI * 2 / 12, 0.44f, std::max(1.0f, r * 0.06f));     // minute hand at 2
+    dl->AddCircleFilled(c, r * 0.08f, col(GOLD), 16);
 }
 
-// text with a drop outline, like the games' logos
-void outlined_text(ImDrawList *dl, float size, ImVec2 p, ImU32 fill, ImU32 outline, const char *text) {
-    float o = std::max(1.0f, size * 0.07f);
-    for (int dx = -1; dx <= 1; dx++)
-        for (int dy = -1; dy <= 1; dy++)
-            if (dx || dy) dl->AddText(nullptr, size, {p.x + dx * o, p.y + dy * o}, outline, text);
-    dl->AddText(nullptr, size, p, fill, text);
-}
-
-// a game with no title-screen image of its own: its name on a blue sky
-void draw_placeholder(ImDrawList *dl, ImVec2 a, ImVec2 b, const GameInfo &g, float rounding) {
-    dl->AddRectFilledMultiColor(a, b, col(BLUE_LIGHT), col(BLUE_LIGHT), col(BLUE), col(BLUE));
-    // round the top corners back into the background
-    dl->AddRect({a.x - 1, a.y - 1}, {b.x + 1, b.y + 1}, col(PANEL), rounding + 1, ImDrawFlags_RoundCornersTop, 2.5f);
+// a game's name without the series name: "Blasters", "Busters 2", "3"; the series for the first
+std::string short_title(const GameInfo &g) {
     std::string rest = g.title;
     const std::string brand = "Yo-kai Watch";
     if (rest.rfind(brand, 0) == 0) rest = rest.substr(brand.size());
     while (!rest.empty() && rest[0] == ' ') rest.erase(0, 1);
-    float w = b.x - a.x, h = b.y - a.y, small = h * 0.16f, big = h * 0.26f;
-    ImVec2 bs = ImGui::GetFont()->CalcTextSizeA(small, FLT_MAX, 0, "YO-KAI WATCH");
-    float big_w = rest.empty() ? 0 : ImGui::GetFont()->CalcTextSizeA(big, FLT_MAX, 0, rest.c_str()).x;
-    if (big_w > w * 0.9f) big *= w * 0.9f / big_w, big_w = w * 0.9f; // fit long names
-    float total = small + (rest.empty() ? 0 : big);
-    float y = a.y + (h - total) / 2;
-    outlined_text(dl, small, {a.x + (w - bs.x) / 2, y}, col(WHITE), col(BLUE_DARK), "YO-KAI WATCH");
-    if (!rest.empty()) outlined_text(dl, big, {a.x + (w - big_w) / 2, y + small}, col(WHITE), col(BLUE_DARK), rest.c_str());
+    return rest.empty() ? brand : rest;
 }
 
-// a game in the library: its title screen, name and versions, and whether it can be played yet
-bool game_tile(int i, bool selected, bool playable, bool have_dump, SDL_Texture *image, float width) {
+// a game with no title-screen image of its own: its name on a blue burst
+void draw_placeholder(ImDrawList *dl, ImVec2 a, ImVec2 b, const GameInfo &g, float rounding) {
+    dl->AddRectFilledMultiColor(a, b, col(ROYAL), col(ROYAL), col(NAVY), col(NAVY));
+    ImVec2 c{(a.x + b.x) / 2, (a.y + b.y) / 2};
+    dl->PushClipRect(a, b, true);
+    for (int i = 0; i < 12; i++) { // rays
+        float t0 = 6.2831853f * float(i) / 12, t1 = t0 + 0.26f, r = (b.x - a.x);
+        dl->AddTriangleFilled(c, {c.x + std::cos(t0) * r, c.y + std::sin(t0) * r}, {c.x + std::cos(t1) * r, c.y + std::sin(t1) * r},
+                              col(alpha(CYAN, 0.18f)));
+    }
+    dl->PopClipRect();
+    (void)rounding;
+    std::string rest = short_title(g);
+    bool series = rest == "Yo-kai Watch";
+    float w = b.x - a.x, h = b.y - a.y, small = h * 0.15f, big = h * 0.30f;
+    ImVec2 bs = display_size(small, "YO-KAI WATCH");
+    float big_w = series ? 0 : display_size(big, rest.c_str()).x;
+    if (big_w > w * 0.86f) big *= w * 0.86f / big_w, big_w = w * 0.86f; // fit long names
+    float total = small + (series ? 0 : big);
+    float y = a.y + (h - total) / 2;
+    if (series) small *= 1.4f, bs = display_size(small, "YO-KAI WATCH"), y = a.y + (h - small) / 2;
+    outlined_text(dl, small, {a.x + (w - bs.x) / 2, y}, col(WHITE), col(NAVY_DARK), "YO-KAI WATCH", display_font);
+    if (!series) outlined_text(dl, big, {a.x + (w - big_w) / 2, y + small}, col(GOLD_LIGHT), col(RED), rest.c_str(), display_font);
+}
+
+// a ribbon with notched ends, like the team logos' banners
+void draw_ribbon(ImDrawList *dl, ImVec2 a, ImVec2 b, ImVec4 c) {
+    float h = b.y - a.y, notch = h * 0.35f, tail = h * 0.55f;
+    // the tails, darker, behind
+    ImVec4 d = mix(c, NAVY_DARK, 0.45f);
+    ImVec2 l[5] = {{a.x - tail, a.y + h * 0.2f}, {a.x + tail, a.y + h * 0.2f}, {a.x + tail, b.y + h * 0.2f},
+                   {a.x - tail, b.y + h * 0.2f}, {a.x - tail + notch, (a.y + b.y) / 2 + h * 0.2f}};
+    ImVec2 r[5] = {{b.x + tail, a.y + h * 0.2f}, {b.x - tail, a.y + h * 0.2f}, {b.x - tail, b.y + h * 0.2f},
+                   {b.x + tail, b.y + h * 0.2f}, {b.x + tail - notch, (a.y + b.y) / 2 + h * 0.2f}};
+    for (ImVec2 *t : {l, r}) {
+        ImVec2 q1[3] = {t[0], t[1], t[4]}, q2[3] = {t[4], t[1], t[2]}, q3[3] = {t[4], t[2], t[3]};
+        for (ImVec2 *q : {q1, q2, q3}) dl->AddConvexPolyFilled(q, 3, col(d));
+    }
+    dl->AddRectFilled({a.x + 2, a.y + 3}, {b.x + 2, b.y + 3}, col(alpha(NAVY_DARK, 0.5f)));
+    dl->AddRectFilledMultiColor(a, b, col(mix(c, WHITE, 0.2f)), col(mix(c, WHITE, 0.2f)), col(c), col(c));
+    dl->AddRect(a, b, col(WHITE), 0, 0, std::max(1.5f, h * 0.07f));
+}
+
+// a game in the library, as a card like the version select's: its title screen in a thick bevelled
+// frame (gold when chosen), its name on a ribbon, its versions below, and whether it can be played
+bool game_tile(int i, bool selected, bool playable, bool have_dump, SDL_Texture *image, float width, bool capturing) {
     const GameInfo &g = GAMES[i];
-    ImGuiStyle &style = ImGui::GetStyle();
-    float line = ImGui::GetTextLineHeight(), pad = style.FramePadding.x, rounding = style.FrameRounding;
-    float image_h = width * 3 / 5; // the 3DS top screen: 400x240
-    float h = image_h + pad * 1.5f + line * 4 + pad; // the name, then up to three lines of versions
+    float line = ImGui::GetTextLineHeight();
+    float border = width * 0.05f, rounding = width * 0.07f;
+    float image_h = (width - border * 2) * 3 / 5; // the 3DS top screen: 400x240
+    float card_h = image_h + border * 2, ribbon_h = line * 1.7f;
+    float h = card_h + ribbon_h * 0.6f + line * 2.6f + line * 0.6f;
     ImVec2 p = ImGui::GetCursorScreenPos();
     ImGui::PushID(i);
     bool clicked = ImGui::InvisibleButton("tile", {width, h}) && playable;
@@ -210,46 +415,148 @@ bool game_tile(int i, bool selected, bool playable, bool have_dump, SDL_Texture 
     if (hovered)
         ImGui::SetItemTooltip("%s%s%s%s%s%s", g.title, *g.subtitle ? "\n" : "", g.subtitle, *g.note ? "\n" : "", g.note,
                                !playable ? "\nNot supported yet" : have_dump ? "" : "\nNo dump found: Browse for it below");
+    if (hovered && playable) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
 
     ImDrawList *dl = ImGui::GetWindowDrawList();
-    ImVec2 q{p.x + width, p.y + h}, img_b{q.x, p.y + image_h};
-    dl->AddRectFilled({p.x + 1, p.y + 2}, {q.x + 1, q.y + 2}, col({0.06f, 0.2f, 0.45f, 0.08f}), rounding); // shadow
-    dl->AddRectFilled(p, q, col(hovered && playable ? PANEL_HOVER : PANEL), rounding);
+    float lift = hovered && playable ? -line * 0.15f : 0;
+    ImVec2 a{p.x, p.y + lift}, b{p.x + width, p.y + card_h + lift};
+    ImVec4 light = selected ? GOLD_LIGHT : playable ? LILAC : SLATE;
+    ImVec4 dark = selected ? ORANGE : playable ? LILAC_DARK : mix(SLATE, NAVY_DARK, 0.4f);
+    if (selected) dl->AddRectFilled({a.x - 4, a.y - 4}, {b.x + 4, b.y + 4}, col(alpha(GOLD, 0.35f)), rounding + 4); // glow
+    dl->AddRectFilled({a.x + 2, a.y + 5}, {b.x + 2, b.y + 5}, col(alpha(NAVY_DARK, 0.6f)), rounding); // shadow
+    dl->AddRectFilled(a, b, col(dark), rounding);
+    dl->AddRectFilled(a, {b.x, (a.y + b.y) / 2}, col(light), rounding, ImDrawFlags_RoundCornersTop); // bevel
+    dl->PushClipRect(a, b, true); // stripes across the frame
+    for (float x = a.x - card_h; x < b.x; x += border * 1.1f)
+        dl->AddLine({x, b.y}, {x + card_h, a.y}, col(alpha(WHITE, 0.16f)), border * 0.35f);
+    dl->PopClipRect();
+    dl->AddRect(a, b, col(WHITE), rounding, 0, std::max(1.5f, border * 0.22f));
+    ImVec2 ia{a.x + border, a.y + border}, ib{b.x - border, b.y - border};
+    float ir = rounding * 0.5f;
     if (image) { // cover the area, cropping the image to its shape
         float iw = 0, ih = 0;
         SDL_GetTextureSize(image, &iw, &ih);
-        float want = width / image_h, have = iw / ih;
+        float want = (ib.x - ia.x) / (ib.y - ia.y), have = iw / ih;
         ImVec2 uv0{0, 0}, uv1{1, 1};
         if (have > want) uv0.x = (1 - want / have) / 2, uv1.x = 1 - uv0.x;
         else uv0.y = (1 - have / want) / 2, uv1.y = 1 - uv0.y;
-        dl->AddImageRounded(ImTextureID(intptr_t(image)), p, img_b, uv0, uv1, col(WHITE), rounding, ImDrawFlags_RoundCornersTop);
+        dl->AddImageRounded(ImTextureID(intptr_t(image)), ia, ib, uv0, uv1, col(WHITE), ir);
     } else {
-        draw_placeholder(dl, p, img_b, g, rounding);
+        dl->PushClipRect(ia, ib, true);
+        draw_placeholder(dl, ia, ib, g, ir);
+        dl->PopClipRect();
     }
-    if (!playable) dl->AddRectFilled(p, img_b, col({1, 1, 1, 0.45f}), rounding, ImDrawFlags_RoundCornersTop);
+    if (!playable) dl->AddRectFilled(ia, ib, col(alpha(NAVY_DARK, 0.5f)), ir);
+    dl->AddRect(ia, ib, col(alpha(NAVY_DARK, 0.8f)), ir, 0, 2);
 
-    // status pill over the image's corner
-    const char *status = !playable ? "Not imported" : have_dump ? "Ready" : "No dump";
-    ImVec2 ts = ImGui::CalcTextSize(status);
-    float pw = ts.x + pad * 1.6f, ph = ts.y + style.FramePadding.y * 0.8f;
-    ImVec2 pp{q.x - pad - pw, p.y + pad};
-    dl->AddRectFilled(pp, {pp.x + pw, pp.y + ph}, col(!playable ? mix(TEXT_DIM, WHITE, 0.2f) : have_dump ? BLUE : mix(BLUE, WHITE, 0.45f)), ph / 2);
-    dl->AddText({pp.x + (pw - ts.x) / 2, pp.y + (ph - ts.y) / 2}, col(WHITE), status);
+    // status chip over the image's corner
+    const char *status = !playable ? "NOT IMPORTED" : capturing ? "CAPTURING" : have_dump ? "READY" : "NO DUMP";
+    float ch = line * 1.25f, cfs = ch * 0.55f;
+    ImVec2 cts = display_size(cfs, status);
+    float cw = cts.x + ch * 1.2f;
+    ImVec2 ca{ib.x - cw - border * 0.3f, ia.y + border * 0.3f};
+    const Palette &chip = !playable ? OFF_BAR : capturing || !have_dump ? CYAN_BAR : GOLD_BAR;
+    draw_bar(dl, ca, {ca.x + cw, ca.y + ch}, chip, false);
+    outlined_text(dl, cfs, {ca.x + (cw - cts.x) / 2, ca.y + (ch - cts.y) / 2}, col(WHITE), col(chip.outline), status, display_font);
 
-    // name, then the versions, kept inside the tile (the tooltip has them in full)
-    float x = p.x + pad, y = img_b.y + pad * 0.75f;
-    dl->PushClipRect({x, y}, {q.x - pad, q.y - pad * 0.5f}, true);
-    dl->AddText({x, y}, col(playable ? TEXT : TEXT_DIM), g.title);
-    float below = y + line;
-    if (*g.note) { // a warning, before the versions
-        dl->AddText(nullptr, 0, {x, below}, col(WARN), g.note, nullptr, width - pad * 2);
-        below += ImGui::GetFont()->CalcTextSizeA(ImGui::GetFontSize(), FLT_MAX, width - pad * 2, g.note).y;
+    // the name on a ribbon across the frame's foot
+    std::string name = short_title(g);
+    float rfs = ribbon_h * 0.58f;
+    ImVec2 rts = display_size(rfs, name.c_str());
+    float rw = std::min(width * 0.86f, rts.x + ribbon_h * 1.6f);
+    if (rts.x > rw - ribbon_h) rfs *= (rw - ribbon_h) / rts.x, rts = display_size(rfs, name.c_str());
+    ImVec2 ra{a.x + (width - rw) / 2, b.y - ribbon_h * 0.4f};
+    draw_ribbon(dl, ra, {ra.x + rw, ra.y + ribbon_h}, selected ? RED : playable ? ROYAL : mix(SLATE, NAVY, 0.5f));
+    outlined_text(dl, rfs, {ra.x + (rw - rts.x) / 2, ra.y + (ribbon_h - rts.y) / 2}, col(WHITE), col(NAVY_DARK),
+                  name.c_str(), display_font);
+
+    // the versions (and a warning), kept inside the tile: the tooltip has them in full
+    float y = ra.y + ribbon_h + line * 0.45f;
+    dl->PushClipRect({p.x, y}, {p.x + width, p.y + h}, true);
+    float below = y;
+    if (*g.note) {
+        dl->AddText(nullptr, 0, {p.x + border, below}, col(WARN), g.note, nullptr, width - border * 2);
+        below += ImGui::GetFont()->CalcTextSizeA(ImGui::GetFontSize(), FLT_MAX, width - border * 2, g.note).y;
     }
-    if (*g.subtitle) dl->AddText(nullptr, 0, {x, below}, col(TEXT_DIM), g.subtitle, nullptr, width - pad * 2);
+    if (*g.subtitle) {
+        ImVec2 sz = ImGui::GetFont()->CalcTextSizeA(ImGui::GetFontSize(), FLT_MAX, width - border * 2, g.subtitle);
+        dl->AddText(nullptr, 0, {p.x + (width - std::min(sz.x, width - border * 2)) / 2, below},
+                    col(playable ? TEXT_DIM : alpha(TEXT_DIM, 0.6f)), g.subtitle, nullptr, width - border * 2);
+    }
     dl->PopClipRect();
-    if (selected) dl->AddRect(p, q, col(BLUE), rounding, 0, 2.5f);
-    else dl->AddRect(p, q, col(BORDER), rounding);
     return clicked;
+}
+
+// Capturing a game's title screen for its card, from the player's dump: the game runs headless
+// (YW2_CAPTURE_TITLE, sdl.cpp) with a throwaway state folder, so it never touches the real saves. One
+// game at a time, in the background
+struct TitleJob {
+    std::mutex lock;
+    SDL_Process *process = nullptr; // while it runs (lock)
+    int game = -1;                  // GAMES index being captured; -1: none
+    std::atomic<bool> finished{false};
+    std::thread thread;
+};
+
+void start_title_capture(TitleJob &job, int game, const std::filesystem::path &exe, const std::string &dump,
+                         const std::string &update, const std::filesystem::path &out, const std::filesystem::path &scratch) {
+    job.game = game, job.finished = false;
+    job.thread = std::thread([&job, exe, dump, update, out, scratch] {
+        std::error_code ec;
+        std::filesystem::remove_all(scratch, ec);
+        std::filesystem::create_directories(scratch, ec);
+        std::filesystem::create_directories(out.parent_path(), ec);
+        std::filesystem::path part = out;
+        part += ".part";
+        SDL_Environment *env = SDL_CreateEnvironment(true);
+        SDL_SetEnvironmentVariable(env, "YW2_HEADLESS", "1", true);
+        SDL_SetEnvironmentVariable(env, "YW2_CAPTURE_TITLE", part.string().c_str(), true);
+        SDL_SetEnvironmentVariable(env, "YW2_STATE_DIR", scratch.string().c_str(), true);
+        std::vector<std::string> args{exe.string()};
+        if (!update.empty()) args.push_back("--update"), args.push_back(update);
+        args.push_back(dump);
+        std::vector<const char *> argv;
+        for (auto &a : args) argv.push_back(a.c_str());
+        argv.push_back(nullptr);
+        SDL_PropertiesID props = SDL_CreateProperties();
+        SDL_SetPointerProperty(props, SDL_PROP_PROCESS_CREATE_ARGS_POINTER, argv.data());
+        SDL_SetPointerProperty(props, SDL_PROP_PROCESS_CREATE_ENVIRONMENT_POINTER, env);
+        SDL_SetNumberProperty(props, SDL_PROP_PROCESS_CREATE_STDOUT_NUMBER, SDL_PROCESS_STDIO_NULL);
+        SDL_SetNumberProperty(props, SDL_PROP_PROCESS_CREATE_STDERR_NUMBER, SDL_PROCESS_STDIO_NULL);
+        SDL_Process *proc = SDL_CreateProcessWithProperties(props);
+        SDL_DestroyProperties(props);
+        SDL_DestroyEnvironment(env);
+        if (!proc) LOG("launcher: couldn't start %s to capture its title: %s", exe.string().c_str(), SDL_GetError());
+        {
+            std::lock_guard lk(job.lock);
+            job.process = proc;
+        }
+        int code = -1;
+        // the game gives up after 90 s of frames; this, if it never gets that far
+        for (int waited = 0; proc && !SDL_WaitProcess(proc, false, &code); waited += 100) {
+            if (waited > 150000) SDL_KillProcess(proc, true);
+            SDL_Delay(100);
+        }
+        {
+            std::lock_guard lk(job.lock);
+            job.process = nullptr;
+        }
+        if (proc) SDL_DestroyProcess(proc);
+        if (code == 0) std::filesystem::rename(part, out, ec);
+        else std::filesystem::remove(part, ec);
+        LOG("launcher: title capture of %s %s (exit %d)", dump.c_str(), code == 0 && !ec ? "done" : "failed", code);
+        std::filesystem::remove_all(scratch, ec);
+        job.finished = true;
+    });
+}
+
+void stop_title_capture(TitleJob &job) {
+    {
+        std::lock_guard lk(job.lock);
+        if (job.process) SDL_KillProcess(job.process, true);
+    }
+    if (job.thread.joinable()) job.thread.join();
+    job.game = -1;
 }
 
 // The Mods tab's state: GameBanana requests run on their own threads and report back here
@@ -609,11 +916,13 @@ void rooms_tab(const std::shared_ptr<RoomsState> &st, Settings &s, const char *c
 
 bool run_launcher(SDL_Window *window, SDL_Renderer *renderer, const std::string &gpu) {
     Settings &s = settings();
+    SDL_SetWindowFullscreen(window, s.launcher_fullscreen);
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGuiIO &io = ImGui::GetIO();
     io.IniFilename = nullptr;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad;
+    load_fonts(io);
     ImGuiStyle &style = ImGui::GetStyle();
     apply_theme(style);
     const ImGuiStyle base_style = style;
@@ -641,11 +950,13 @@ bool run_launcher(SDL_Window *window, SDL_Renderer *renderer, const std::string 
     Capture capture;
     bool play = false, quit = false;
     static const char *FILTERS[] = {"Sharp pixels (recommended)", "Smooth", "Nearest neighbor"};
-    static const SDL_DialogFileFilter DUMP_TYPES[] = {{"3DS game dumps", "3ds;cci;cxi"}, {"All files", "*"}};
+    static const SDL_DialogFileFilter DUMP_TYPES[] = {{"3DS game dumps and updates", "3ds;cci;cxi;cia;ncch"}, {"All files", "*"}};
 
     // YW2_LAUNCHER_SCREENSHOT=<prefix>: saves each tab as a PNG and quits (for testing the UI)
     const char *shot = std::getenv("YW2_LAUNCHER_SCREENSHOT");
     int frame = 0, shot_tab = 0;
+    int top_tab = 0, settings_tab = 0; // the page shown
+    uint64_t frame_count = 0;
     // top tabs, and the Settings tab's own
     static const char *TABS[] = {"Library", "Mods", "Rooms", "Settings"};
     static const char *SETTINGS_TABS[] = {"Display", "Controls", "Audio"};
@@ -690,20 +1001,28 @@ bool run_launcher(SDL_Window *window, SDL_Renderer *renderer, const std::string 
     std::string routed_path = "\x01";
     Route dump_route{Route::UNREADABLE};
 
-    // title-screen images: titles/<id>.png in the data folder, supplied by the player (none ship)
+    // title-screen images: titles/<id>.png in the data folder if the player put one there, else
+    // titles/auto/<id>.png, captured from their dump (TitleJob). None ship
     std::error_code ec;
-    const std::filesystem::path title_dir = platform::data_dir() / "titles";
+    const std::filesystem::path title_dir = platform::data_dir() / "titles", auto_dir = title_dir / "auto";
     std::filesystem::create_directories(title_dir, ec);
     std::vector<SDL_Texture *> title_images(GAME_COUNT, nullptr);
-    for (int i = 0; i < GAME_COUNT; i++) {
-        std::filesystem::path png = title_dir / (std::string(GAMES[i].id) + ".png");
-        if (!std::filesystem::is_regular_file(png, ec)) continue;
-        if (SDL_Surface *surface = SDL_LoadPNG(png.string().c_str())) {
-            title_images[i] = SDL_CreateTextureFromSurface(renderer, surface);
-            SDL_DestroySurface(surface);
-            if (title_images[i]) SDL_SetTextureScaleMode(title_images[i], SDL_SCALEMODE_LINEAR);
+    auto load_title = [&](int i) {
+        for (const auto &dir : {title_dir, auto_dir}) {
+            std::filesystem::path png = dir / (std::string(GAMES[i].id) + ".png");
+            if (!std::filesystem::is_regular_file(png, ec)) continue;
+            if (SDL_Surface *surface = SDL_LoadPNG(png.string().c_str())) {
+                if (title_images[i]) SDL_DestroyTexture(title_images[i]);
+                title_images[i] = SDL_CreateTextureFromSurface(renderer, surface);
+                SDL_DestroySurface(surface);
+                if (title_images[i]) SDL_SetTextureScaleMode(title_images[i], SDL_SCALEMODE_LINEAR);
+                return;
+            }
         }
-    }
+    };
+    for (int i = 0; i < GAME_COUNT; i++) load_title(i);
+    TitleJob title_job;
+    std::set<int> title_tried; // this session: captured, or tried and failed
 
     while (!play && !quit) {
         SDL_Event e;
@@ -734,15 +1053,26 @@ bool run_launcher(SDL_Window *window, SDL_Renderer *renderer, const std::string 
             }
             ImGui_ImplSDL3_ProcessEvent(&e);
             if (e.type == SDL_EVENT_QUIT) quit = true;
+            if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat && e.key.scancode == SDL_SCANCODE_F11 && capture.control < 0) {
+                s.launcher_fullscreen = !s.launcher_fullscreen;
+                SDL_SetWindowFullscreen(window, s.launcher_fullscreen);
+            }
             if (e.type == SDL_EVENT_GAMEPAD_ADDED)
                 if (SDL_Gamepad *g = SDL_OpenGamepad(e.gdevice.which)) pads.push_back(g);
         }
         {
             std::lock_guard lk(picked_lock);
             if (!picked.empty()) { // remember its folder, and find the other dumps there
-                s.game_path = picked;
+                // an update is added to its game (which stays chosen); anything else is the dump to play
+                auto id = peek_program_id(picked);
+                bool is_update = id && update_of(*id) && find_dump(*update_of(*id));
+                if (!is_update) s.game_path = picked;
                 s.dump_folder = std::filesystem::path(picked).parent_path().string();
-                if (auto id = peek_program_id(picked); id && find_dump(*id)) s.dumps[*id] = picked;
+                remember(s, picked);
+                if (is_update) {
+                    if (auto it = s.dumps.find(*update_of(*id)); it != s.dumps.end()) s.game_path = it->second;
+                    routed_path = "\x01"; // route it again: it now plays the update's code
+                }
                 find_dumps(s, s.dump_folder);
                 notice.clear();
                 picked.clear();
@@ -771,14 +1101,19 @@ bool run_launcher(SDL_Window *window, SDL_Renderer *renderer, const std::string 
             check_builds = false;
             for (auto &[id, path] : s.dumps) {
                 const KnownDump *d = find_dump(id);
-                if (!d || !dump_exists(path) || build_tried.count(d->binary) || !needs_build(*d)) continue;
-                std::vector<std::pair<uint64_t, std::string>> versions; // every version sharing the executable
+                if (!d || !dump_exists(path)) continue;
+                std::string binary = code_binary(*d);
+                if (build_tried.count(binary) || !needs_build(*d)) continue;
+                // every version sharing the executable: their updates' code, when it's built from updates
+                std::vector<std::pair<uint64_t, std::string>> versions;
                 for (auto &[other, other_path] : s.dumps)
-                    if (const KnownDump *o = find_dump(other); o && std::strcmp(o->binary, d->binary) == 0 && dump_exists(other_path))
-                        versions.push_back({other, other_path});
-                build_tried.insert(d->binary);
-                start_build(build_job, d->binary, versions);
-                building = true, build_binary = d->binary;
+                    if (const KnownDump *o = find_dump(other); o && code_binary(*o) == binary && dump_exists(other_path)) {
+                        std::string update = update_for(other);
+                        versions.push_back({other, update.empty() ? other_path : update});
+                    }
+                build_tried.insert(binary);
+                start_build(build_job, binary, versions);
+                building = true, build_binary = binary;
                 break;
             }
         }
@@ -790,7 +1125,7 @@ bool run_launcher(SDL_Window *window, SDL_Renderer *renderer, const std::string 
                 needs_build(*dump_route.dump))
                 dump_route.kind = Route::NOT_BUILT;
         }
-        bool chosen_building = building && dump_route.dump && build_binary == dump_route.dump->binary;
+        bool chosen_building = building && dump_route.dump && build_binary == dump_route.binary;
         bool dump_ok = (dump_route.kind == Route::HERE || dump_route.kind == Route::OTHER) && !chosen_building;
         std::string dump_name; // "Yo-kai Watch 2: Bony Spirits"
         if (dump_route.dump) {
@@ -799,41 +1134,86 @@ bool run_launcher(SDL_Window *window, SDL_Renderer *renderer, const std::string 
             dump_name = std::string(g ? g->title : "?") + (v.empty() ? "" : ": ") + v;
         }
 
+        // title screens: one capture at a time, for a game with a playable dump and no image, when
+        // nothing's being built (checked every second)
+        if (title_job.game >= 0 && title_job.finished) {
+            if (title_job.thread.joinable()) title_job.thread.join();
+            load_title(title_job.game);
+            title_job.game = -1;
+        }
+        if (title_job.game < 0 && !building && !shot && frame_count % 60 == 0)
+            for (int i = 0; i < GAME_COUNT; i++) {
+                if (title_images[i] || title_tried.count(i)) continue;
+                std::string path = dump_for(s, GAMES[i].id);
+                if (path.empty() || !dump_exists(path)) continue;
+                Route r = route(path);
+                if ((r.kind != Route::HERE && r.kind != Route::OTHER) || needs_build(*r.dump)) continue;
+                title_tried.insert(i);
+                start_title_capture(title_job, i, executable_for(r), path, update_for(r.dump->program_id),
+                                    auto_dir / (std::string(GAMES[i].id) + ".png"),
+                                    platform::data_dir() / "build" / "title-capture");
+                break;
+            }
+        frame_count++;
         ask_relay(rooms_state, s);
+        if (s.menu_music && !menu_music::started()) menu_music::start();
+        {
+            bool unfocused = !(SDL_GetWindowFlags(window) & SDL_WINDOW_INPUT_FOCUS);
+            menu_music::set_volume(s.menu_music && !(s.mute_in_background && unfocused) ? float(s.volume) / 100.0f : 0.0f);
+        }
+        if (s.launcher_fullscreen != bool(SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN))
+            SDL_SetWindowFullscreen(window, s.launcher_fullscreen); // the checkbox
         rescale();
         ImGui_ImplSDLRenderer3_NewFrame();
         ImGui_ImplSDL3_NewFrame();
         ImGui::NewFrame();
-        ImGui::SetNextWindowPos({0, 0});
-        ImGui::SetNextWindowSize(io.DisplaySize);
+        if (shot) top_tab = SHOT_TOP[shot_tab], settings_tab = std::max(0, SHOT_SUB[shot_tab]);
+        // the backdrop fills the window; the launcher sits between its sunburst strips
+        float unit = ImGui::GetFontSize() * 2.0f, side = unit * 1.6f;
+        draw_backdrop(ImGui::GetBackgroundDrawList(), {0, 0}, io.DisplaySize, unit);
+        ImGui::SetNextWindowPos({side, 0});
+        ImGui::SetNextWindowSize({io.DisplaySize.x - side * 2, io.DisplaySize.y});
         ImGui::Begin("launcher", nullptr,
-                     ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
+                     ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
+                         ImGuiWindowFlags_NoBackground);
 
-        { // header: a blue band with the logo and name
+        { // header: the logo and name, and the pages as the games' buttons (on the right, or below
+          // when the window is narrow)
             ImDrawList *dl = ImGui::GetWindowDrawList();
-            float title_size = ImGui::GetFontSize() * 2.2f, logo = title_size * 1.25f;
-            ImVec2 p = ImGui::GetCursorScreenPos(), win = ImGui::GetWindowPos();
-            float band_bottom = p.y + logo + style.WindowPadding.y;
-            dl->AddRectFilledMultiColor(win, {win.x + ImGui::GetWindowWidth(), band_bottom}, col(BLUE), col(BLUE),
-                                        col(BLUE_DARK), col(BLUE_DARK));
+            float title_size = ImGui::GetFontSize() * 2.3f, logo = title_size * 1.3f;
+            ImVec2 p = ImGui::GetCursorScreenPos();
             draw_logo(dl, {p.x + logo / 2, p.y + logo / 2}, logo / 2);
-            float x = p.x + logo + style.ItemSpacing.x * 1.5f;
-            outlined_text(dl, title_size, {x, p.y + (logo - title_size) / 2}, col(WHITE), col(BLUE_DARK), "CLOCKWORK");
-            ImGui::Dummy({ImGui::GetContentRegionAvail().x, band_bottom - p.y});
-            ImGui::Spacing();
+            float x = p.x + logo + style.ItemSpacing.x * 1.2f;
+            ImVec2 ts = display_size(title_size, "CLOCKWORK");
+            outlined_text(dl, title_size, {x, p.y + (logo - ts.y) / 2}, col(WHITE), col(NAVY_DARK), "CLOCKWORK", display_font);
+            float bh = logo * 0.6f, bw = ImGui::GetFontSize() * 6.4f, gap = style.ItemSpacing.x * 0.5f;
+            float right = p.x + ImGui::GetContentRegionAvail().x, row = bw * 4 + gap * 3;
+            bool beside = right - row >= x + ts.x + gap * 4;
+            float tx = beside ? right - row : p.x, ty = beside ? p.y + (logo - bh) / 2 : p.y + logo + style.ItemSpacing.y;
+            for (int i = 0; i < 4; i++) {
+                ImGui::SetCursorScreenPos({tx + float(i) * (bw + gap), ty});
+                if (bar_button(TABS[i], {bw, bh}, top_tab == i ? GOLD_BAR : LILAC_BAR)) top_tab = i;
+            }
+            ImGui::SetCursorScreenPos({p.x, (beside ? p.y + logo : ty + bh) + style.ItemSpacing.y * 1.5f});
         }
 
-        float footer = ImGui::GetFrameHeightWithSpacing() * 2.2f;
-        ImGui::BeginChild("tabs", {0, -footer});
-        if (ImGui::BeginTabBar("top")) {
-            auto tab = [&](int i) {
-                return ImGui::BeginTabItem(TABS[i], nullptr,
-                                           shot && SHOT_TOP[shot_tab] == i && frame % 4 == 0 ? ImGuiTabItemFlags_SetSelected : 0);
-            };
-            auto sub_tab = [&](int i) {
-                return ImGui::BeginTabItem(SETTINGS_TABS[i], nullptr,
-                                           shot && SHOT_SUB[shot_tab] == i && frame % 4 == 0 ? ImGuiTabItemFlags_SetSelected : 0);
-            };
+        // the page, on an angled panel
+        float footer = ImGui::GetFrameHeight() * 2.6f;
+        {
+            ImVec2 pa = ImGui::GetCursorScreenPos(), avail = ImGui::GetContentRegionAvail();
+            ImVec2 pb{pa.x + avail.x, pa.y + avail.y - footer};
+            ImDrawList *dl = ImGui::GetWindowDrawList();
+            float cut = unit * 0.45f;
+            chamfer_panel(dl, {pa.x + 3, pa.y + 6}, {pb.x + 3, pb.y + 6}, cut, col(alpha(NAVY_DARK, 0.6f)), 0, 0);
+            chamfer_panel(dl, pa, pb, cut, col(alpha(NAVY_DARK, 0.78f)), col(EDGE), 3);
+            chamfer_panel(dl, {pa.x + 5, pa.y + 5}, {pb.x - 5, pb.y - 5}, cut * 0.8f, 0, col(alpha(ROYAL, 0.8f)), 1.5f);
+        }
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {unit * 0.55f, unit * 0.4f});
+        ImGui::BeginChild("tabs", {0, -footer}, ImGuiChildFlags_AlwaysUseWindowPadding);
+        ImGui::PopStyleVar();
+        {
+            auto tab = [&](int i) { return top_tab == i; };
+            auto sub_tab = [&](int i) { return settings_tab == i; };
             if (tab(0)) {
                 section("Games");
                 { // a grid of tiles, as many across as fit
@@ -845,7 +1225,8 @@ bool run_launcher(SDL_Window *window, SDL_Renderer *renderer, const std::string 
                         if (i % columns) ImGui::SameLine();
                         bool chosen = dump_route.dump && std::strcmp(dump_route.dump->game, GAMES[i].id) == 0;
                         std::string found = dump_for(s, GAMES[i].id);
-                        if (game_tile(i, chosen, playable[i], !found.empty(), title_images[i], width) && !chosen) {
+                        if (game_tile(i, chosen, playable[i], !found.empty(), title_images[i], width, title_job.game == i) &&
+                            !chosen) {
                             if (found.empty()) notice = std::string("No dump of ") + GAMES[i].title +
                                                         " found yet: Browse for it below.";
                             else s.game_path = found, notice.clear();
@@ -882,15 +1263,16 @@ bool run_launcher(SDL_Window *window, SDL_Renderer *renderer, const std::string 
                     if (const GameInfo *g = find_game(dump_route.dump->game); g && *g->note)
                         ImGui::TextColored(WARN, "%s: %s", g->title, g->note);
                 ImGui::PushStyleColor(ImGuiCol_Text, TEXT_DIM);
-                ImGui::TextWrapped("Title screens: put %s.png, %s.png ... in %s", GAMES[0].id, GAMES[1].id,
-                                   title_dir.string().c_str());
+                ImGui::TextWrapped("Title screens are captured from your dumps. To use your own picture, put %s.png, "
+                                   "%s.png ... in %s", GAMES[0].id, GAMES[1].id, title_dir.string().c_str());
                 ImGui::PopStyleColor();
                 if (ImGui::IsItemHovered())
                     ImGui::SetItemTooltip("yw1.png, yw2.png, blasters.png, yw3.png, busters2.png (any size; a 400x240 "
-                                          "screenshot fits best). Read when the launcher opens.");
+                                          "screenshot fits best). Read when the launcher opens. The captured ones are "
+                                          "in titles/auto: delete one to capture it again.");
                 section("Your game dumps");
-                ImGui::TextWrapped("Decrypted dumps of your own cartridges (.3ds, .cci or .cxi). Choose one, and the "
-                                   "others in its folder are found too.");
+                ImGui::TextWrapped("Decrypted dumps of your own games (.3ds, .cci, .cxi or .cia), and their updates "
+                                   "(.cia or .cxi). Choose one, and the others in its folder are found too.");
                 char buf[1024];
                 std::snprintf(buf, sizeof buf, "%s", s.game_path.c_str());
                 ImGui::SetNextItemWidth(-ImGui::CalcTextSize("Browse...").x - style.FramePadding.x * 4);
@@ -905,7 +1287,7 @@ bool run_launcher(SDL_Window *window, SDL_Renderer *renderer, const std::string 
                     ImGui::TextColored(bad, "File not found.");
                 else if (dump_ok)
                     ImGui::TextColored(BLUE, "%s", dump_name.c_str());
-                else if (!chosen_building && !(build_failed && dump_route.dump && build_binary == dump_route.dump->binary))
+                else if (!chosen_building && !(build_failed && dump_route.dump && build_binary == dump_route.binary))
                     ImGui::TextColored(bad, "%s", route_problem(dump_route).c_str());
                 if (dump_route.kind == Route::NOT_BUILT && !building && !build_failed) {
                     std::string why;
@@ -966,19 +1348,21 @@ bool run_launcher(SDL_Window *window, SDL_Renderer *renderer, const std::string 
                 section("Startup");
                 ImGui::Checkbox("Show this launcher when the game starts", &s.show_launcher);
                 ImGui::TextDisabled("Hold Shift while starting, or pass --launcher, to bring it back.");
-                ImGui::EndTabItem();
             }
             if (tab(1)) {
                 const GameInfo *g = dump_route.dump ? find_game(dump_route.dump->game) : nullptr;
                 mods_tab(mods_state, g ? g->id : "", g ? g->title : "", installed);
-                ImGui::EndTabItem();
             }
             if (tab(2)) {
                 rooms_tab(rooms_state, s, dump_route.dump ? dump_route.dump->game : "");
-                ImGui::EndTabItem();
             }
             if (tab(3)) {
-            if (ImGui::BeginTabBar("settings")) {
+            { // the settings' own pages
+                float sbh = ImGui::GetFrameHeight() * 1.2f, sbw = ImGui::GetFontSize() * 6.4f;
+                for (int i = 0; i < 3; i++) {
+                    if (i) ImGui::SameLine(0, style.ItemSpacing.x * 0.5f);
+                    if (bar_button(SETTINGS_TABS[i], {sbw, sbh}, settings_tab == i ? CYAN_BAR : NAVY_BAR)) settings_tab = i;
+                }
             if (sub_tab(0)) {
                 section("Screens");
                 int mode = s.single_screen ? 1 : 0;
@@ -1023,6 +1407,7 @@ bool run_launcher(SDL_Window *window, SDL_Renderer *renderer, const std::string 
                                     "Smoother, about two frames (33 ms) later.");
                 section("Window");
                 ImGui::Checkbox("Fullscreen", &s.fullscreen);
+                ImGui::Checkbox("This launcher fullscreen (F11)", &s.launcher_fullscreen);
                 ImGui::Checkbox("VSync", &s.vsync);
                 ImGui::SetNextItemWidth(ImGui::GetFontSize() * 18);
                 ImGui::Combo("Scaling", &s.filter, FILTERS, 3);
@@ -1030,7 +1415,6 @@ bool run_launcher(SDL_Window *window, SDL_Renderer *renderer, const std::string 
                 ImGui::TextDisabled("F6 adaptive layout   F7 widescreen   F8 picture-in-picture   F9 one/two screens");
                 ImGui::TextDisabled("F12 saves a capture (screenshot + scene info) to the captures folder");
                 ImGui::TextDisabled("Tab or right stick swap screens   F11 fullscreen");
-                ImGui::EndTabItem();
             }
             if (sub_tab(1)) {
                 ImGui::TextWrapped("Click a binding, then press a key or controller button (Esc cancels). "
@@ -1043,6 +1427,7 @@ bool run_launcher(SDL_Window *window, SDL_Renderer *renderer, const std::string 
                     for (int i = 0; i < CONTROL_COUNT; i++) {
                         ImGui::TableNextRow();
                         ImGui::TableNextColumn();
+                        ImGui::AlignTextToFramePadding();
                         ImGui::TextUnformatted(CONTROLS[i].label);
                         for (int col = 0; col < 2; col++) {
                             ImGui::TableNextColumn();
@@ -1060,13 +1445,15 @@ bool run_launcher(SDL_Window *window, SDL_Renderer *renderer, const std::string 
                 }
                 ImGui::TextDisabled("Right-click a binding to clear it.");
                 if (ImGui::Button("Reset to defaults")) s.reset_controls();
-                ImGui::EndTabItem();
             }
             if (sub_tab(2)) {
                 section("Volume");
                 ImGui::SetNextItemWidth(ImGui::GetFontSize() * 16);
                 ImGui::SliderInt("##volume", &s.volume, 0, 100, "%d%%");
                 ImGui::Checkbox("Mute when the game window isn't in front", &s.mute_in_background);
+                ImGui::Checkbox("Music in this launcher", &s.menu_music);
+                ImGui::TextDisabled("Blasters' version-select theme, from your Blasters dump; or your own menu-music.wav "
+                                    "in the data folder.");
                 section("Output");
                 std::string current = s.audio_device.empty() ? "System default" : s.audio_device;
                 ImGui::SetNextItemWidth(ImGui::GetFontSize() * 22);
@@ -1087,29 +1474,19 @@ bool run_launcher(SDL_Window *window, SDL_Renderer *renderer, const std::string 
                 ImGui::SetNextItemWidth(ImGui::GetFontSize() * 16);
                 if (ImGui::Combo("##latency", &latency, LATENCY, 3)) s.audio_latency = latency;
                 ImGui::TextDisabled("Lower answers sooner; higher crackles less when the PC is busy.");
-                ImGui::EndTabItem();
             }
-            ImGui::EndTabBar(); // settings
             }
-            ImGui::EndTabItem();
             }
-            ImGui::EndTabBar();
         }
         ImGui::EndChild();
 
-        ImGui::Separator();
-        ImGui::BeginDisabled(!dump_ok);
-        ImGui::PushStyleColor(ImGuiCol_Button, BLUE);
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, mix(BLUE, BLUE_LIGHT, 0.3f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonActive, BLUE_DARK);
-        ImGui::PushStyleColor(ImGuiCol_Text, WHITE);
-        std::string play_label = dump_ok ? "Play " + dump_name : std::string("Play");
-        if (ImGui::Button(play_label.c_str(), {ImGui::GetContentRegionAvail().x * 0.7f, ImGui::GetFrameHeight() * 1.6f}))
-            play = true;
-        ImGui::PopStyleColor(4);
-        ImGui::EndDisabled();
-        ImGui::SameLine();
-        if (ImGui::Button("Quit", {-1, ImGui::GetFrameHeight() * 1.6f})) quit = true;
+        // Play, gold like the games' confirm buttons, and Quit
+        ImGui::Dummy({0, ImGui::GetFrameHeight() * 0.25f});
+        float fh = ImGui::GetFrameHeight() * 1.9f;
+        std::string play_label = (dump_ok ? "Play  " + dump_name : std::string("Play")) + "##play";
+        if (bar_button(play_label.c_str(), {ImGui::GetContentRegionAvail().x * 0.74f, fh}, GOLD_BAR, dump_ok)) play = true;
+        ImGui::SameLine(0, style.ItemSpacing.x * 2);
+        if (bar_button("Quit", {ImGui::GetContentRegionAvail().x, fh}, LILAC_BAR)) quit = true;
         ImGui::End();
 
         ImGui::Render();
@@ -1130,6 +1507,8 @@ bool run_launcher(SDL_Window *window, SDL_Renderer *renderer, const std::string 
         SDL_RenderPresent(renderer);
     }
 
+    menu_music::stop();
+    stop_title_capture(title_job);
     s.save();
     for (SDL_Texture *t : title_images)
         if (t) SDL_DestroyTexture(t);

@@ -2,6 +2,7 @@
 #include "frontend/games.h"
 #include "mods.h"
 #include "frontend/frontend.h"
+#include "frontend/handoff.h"
 #include "game_code.h"
 #include "kernel/kernel.h"
 #include "loader.h"
@@ -30,16 +31,18 @@
 namespace {
 GameImage game;
 
-// on the game thread: load the dump and run it
+// on the game thread: load the dump (with its update, if there is one) and run it
 void game_main(const char *dump_path) {
-    open_dump(dump_path);
+    std::string update; // its update (frontend::use_update, or found by the launcher)
+    if (auto id = peek_program_id(dump_path)) update = frontend::update_for(*id);
+    open_dump(dump_path, update);
     const frontend::KnownDump *known = frontend::find_dump(dump().program_id());
     mods::apply(dump(), known ? known->game : "", dump().program_id());
     mem::init();
     if (!game_code::linked()) { // the clockwork program: the game's code is its module
         std::string why;
         if (!known) fatal("Clockwork doesn't recognize this game.");
-        if (!game_code::load_module(known->binary, &why)) fatal("%s", why.c_str());
+        if (!game_code::load_module(frontend::code_binary(*known, dump().has_update()), &why)) fatal("%s", why.c_str());
     }
     game = load_game();
     kernel::init(game);
@@ -157,9 +160,17 @@ int main(int argc, char **argv) {
     for (int i = 1; i < argc; i++) {
         if (std::strcmp(argv[i], "--launcher") == 0) force_launcher = true;
         else if (std::strcmp(argv[i], "--play") == 0) play = true; // straight into the game
+        else if (std::strcmp(argv[i], "--update") == 0 && i + 1 < argc) {
+            if (!frontend::use_update(argv[++i])) {
+                std::fprintf(stderr, "%s isn't a decrypted update Clockwork can read\n", argv[i]);
+                return 1;
+            }
+        }
         else if (std::strcmp(argv[i], "--help") == 0 || std::strcmp(argv[i], "-h") == 0) {
             std::printf("Clockwork: Yo-kai Watch, recompiled for PC\n"
-                        "usage: %s [--launcher | --play] [your decrypted game dump (.3ds/.cci/.cxi)]\n", argv[0]);
+                        "usage: %s [--launcher | --play] [--update <its update (.cia/.cxi)>] [your decrypted game dump "
+                        "(.3ds/.cci/.cxi/.cia)]\n",
+                        argv[0]);
             return 0;
         } else dump = argv[i];
     }

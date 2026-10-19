@@ -40,10 +40,21 @@ std::filesystem::path data_dir() {
     return dir;
 }
 
+std::filesystem::path state_dir() {
+    static std::filesystem::path dir = [] {
+        const char *v = std::getenv("YW2_STATE_DIR");
+        if (!v || !*v) return data_dir();
+        std::filesystem::path d = v;
+        std::filesystem::create_directories(d);
+        return d;
+    }();
+    return dir;
+}
+
 std::filesystem::path game_dir(uint64_t program_id) {
     char id[17];
     std::snprintf(id, sizeof id, "%016llx", (unsigned long long)program_id);
-    return data_dir() / "games" / id;
+    return state_dir() / "games" / id;
 }
 
 int instance_slot() {

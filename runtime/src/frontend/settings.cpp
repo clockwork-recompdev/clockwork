@@ -111,8 +111,11 @@ void Settings::load() {
         if (k == "game_path") game_path = v;
         else if (k == "dump_folder") dump_folder = v;
         else if (k.rfind("dump.", 0) == 0) dumps[std::strtoull(k.c_str() + 5, nullptr, 16)] = v;
+        else if (k.rfind("update.", 0) == 0) updates[std::strtoull(k.c_str() + 7, nullptr, 16)] = v;
         else if (k.rfind("layout.", 0) == 0) layouts[k.substr(7)] = v;
         else if (k == "show_launcher") show_launcher = b;
+        else if (k == "launcher_fullscreen") launcher_fullscreen = b;
+        else if (k == "menu_music") menu_music = b;
         else if (k == "single_screen") single_screen = b;
         else if (k == "swap_screens") swap_screens = b;
         else if (k == "picture_in_picture") picture_in_picture = b;
@@ -154,7 +157,14 @@ void Settings::save() const {
         std::snprintf(key, sizeof key, "dump.%016llx=", (unsigned long long)id);
         f << key << path << "\n";
     }
+    for (auto &[id, path] : updates) {
+        char key[32];
+        std::snprintf(key, sizeof key, "update.%016llx=", (unsigned long long)id);
+        f << key << path << "\n";
+    }
     f << "show_launcher=" << show_launcher << "\n"
+      << "launcher_fullscreen=" << launcher_fullscreen << "\n"
+      << "menu_music=" << menu_music << "\n"
       << "single_screen=" << single_screen << "\n"
       << "swap_screens=" << swap_screens << "\n"
       << "picture_in_picture=" << picture_in_picture << "\n"

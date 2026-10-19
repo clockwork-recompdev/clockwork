@@ -79,6 +79,64 @@ struct FrameDump {
     }
 } frame_dump;
 
+// YW2_CAPTURE_TITLE=<file.png> (headless): finds the game's title screen and saves it, for the
+// launcher's cards. The games open with logos (plain) and then their opening movie (colourful),
+// which a press skips to the title screen. So: wait until the screen has been colourful for a
+// second, press A once, and save the first colourful frame 6 s later (the title, its logo landed). A game
+// that shows its title before any movie opens the title's menu with that press, below the title.
+// Exit status 2 if nothing colourful showed up in 90 s
+struct TitleCapture {
+    static constexpr int EVERY = 30, SETTLE = 360, GIVE_UP = 90 * 60;
+    std::string path;
+    int colourful_for = 0;  // samples in a row
+    int pressed_at = -1;    // the frame A went down
+    TitleCapture() {
+        if (const char *env = std::getenv("YW2_CAPTURE_TITLE")) path = env;
+    }
+    bool on() const { return !path.empty(); }
+
+    void press(int frame, Input &in) const {
+        if (on() && pressed_at >= 0 && frame < pressed_at + 10) in.buttons |= BTN_A;
+    }
+
+    // colourful and not plain: enough saturation and contrast over a sample of pixels
+    static bool colourful(const uint8_t *rgba, size_t pixels) {
+        double sat = 0, lum = 0, lum2 = 0;
+        size_t n = 0;
+        for (size_t i = 0; i < pixels; i += 7, n++) {
+            const uint8_t *p = rgba + i * 4;
+            int hi = std::max({p[0], p[1], p[2]}), lo = std::min({p[0], p[1], p[2]});
+            double l = (p[0] * 0.3 + p[1] * 0.59 + p[2] * 0.11) / 255.0;
+            sat += hi ? double(hi - lo) / hi : 0, lum += l, lum2 += l * l;
+        }
+        double mean = lum / double(n), var = lum2 / double(n) - mean * mean;
+        return sat / double(n) > 0.25 && var > 0.01;
+    }
+
+    void frame(int top_frame, const uint8_t *rgba, int width, int height) {
+        if (!on()) return;
+        if (top_frame > GIVE_UP) {
+            LOG("title capture: no title screen found");
+            std::fflush(nullptr);
+            std::_Exit(2);
+        }
+        if (top_frame % EVERY) return;
+        bool bright = colourful(rgba, size_t(width) * height);
+        if (pressed_at < 0) { // waiting for the movie
+            colourful_for = bright ? colourful_for + 1 : 0;
+            if (colourful_for >= 2) pressed_at = top_frame;
+            return;
+        }
+        if (top_frame < pressed_at + SETTLE || !bright) return;
+        SDL_Surface *s = SDL_CreateSurfaceFrom(width, height, SDL_PIXELFORMAT_RGBA32, const_cast<uint8_t *>(rgba), width * 4);
+        bool saved = s && SDL_SavePNG(s, path.c_str());
+        if (s) SDL_DestroySurface(s);
+        LOG("title capture: %s at frame %d %s", saved ? "saved" : "couldn't save", top_frame, saved ? "" : SDL_GetError());
+        std::fflush(nullptr);
+        std::_Exit(saved ? 0 : 1);
+    }
+} title_capture;
+
 // YW2_PRESS=<button>@<frame>[,...]: holds a button for 10 frames at a top-screen frame
 // number (buttons: a b x y l r start select up down left right, cup cdown cleft cright for the
 // circle pad, or touch:X:Y for a tap on the bottom screen), for unattended testing
@@ -241,15 +299,18 @@ struct LayoutProfile {
     const char *game; // GameInfo::id
     LayoutKind for_context[CTX_COUNT];
 };
-//                                     other      field       scene       menu    battle      dual
-constexpr LayoutProfile YW2_PROFILE = {"yw2", {L_DEFAULT, L_MINIMAP, L_TOP_ONLY, L_MENU, L_CONTROLS, L_DEFAULT}};
+// Menus keep the field's layout (the bottom screen small in the corner) instead of zooming in on
+// it (L_MENU): switching back and forth as menus open and close was distracting. F5 still picks
+// L_MENU for a game's menus
+//                                     other      field       scene        menu    battle      dual
+constexpr LayoutProfile YW2_PROFILE = {"yw2", {L_DEFAULT, L_MINIMAP, L_TOP_ONLY, L_MINIMAP, L_CONTROLS, L_DEFAULT}};
 constexpr LayoutProfile PROFILES[] = {
     YW2_PROFILE,
     // Blasters' bottom screen is always its map: a busy one reads as battle controls, but stays small
-    {"blasters", {L_DEFAULT, L_MINIMAP, L_TOP_ONLY, L_MENU, L_MINIMAP, L_DEFAULT}},
+    {"blasters", {L_DEFAULT, L_MINIMAP, L_TOP_ONLY, L_MINIMAP, L_MINIMAP, L_DEFAULT}},
     // Yo-kai Watch 3's battles: the controls top right, where its map is, so the bottom screen
     // stays put when a battle's bottom screen briefly looks like the map
-    {"yw3", {L_DEFAULT, L_MINIMAP, L_TOP_ONLY, L_MENU, L_CONTROLS_TOP, L_DEFAULT}},
+    {"yw3", {L_DEFAULT, L_MINIMAP, L_TOP_ONLY, L_MINIMAP, L_CONTROLS_TOP, L_DEFAULT}},
 };
 
 LayoutKind profile_layout(const std::string &game, Context c) {
@@ -420,6 +481,7 @@ Input input() {
     std::lock_guard lk(input_lock);
     Input in = current_input;
     input_script.apply(top_frames, in);
+    title_capture.press(top_frames, in);
     return in;
 }
 
@@ -455,6 +517,7 @@ void present(int screen, const uint8_t *rgba, int width, int height) {
         if (trace_from >= 0 && top_frames == trace_from + 12) log_cfg::gpu = false;
     }
     frame_dump.frame(screen, rgba, width, height);
+    if (screen == 0) title_capture.frame(top_frames, rgba, width, height);
     std::lock_guard lk(frame_lock);
     frames[screen].assign(rgba, rgba + size_t(width) * height * 4);
     frame_width[screen] = width, frame_height[screen] = height;
@@ -479,8 +542,8 @@ bool hand_off_or_explain(const std::string &dump_path, std::string *problem) {
     Route r = route(dump_path);
     if (r.kind == Route::HERE) return true;
     if (r.kind == Route::OTHER) {
-        play_in(r.dump->binary, dump_path); // returns only on failure
-        *problem = std::string("Could not start ") + r.dump->binary + ".";
+        play_in(r.binary.c_str(), dump_path); // returns only on failure
+        *problem = "Could not start " + r.binary + ".";
         return false;
     }
     *problem = route_problem(r);
@@ -592,7 +655,7 @@ void run(void (*start)(const char *dump), const char *cli_dump, bool force_launc
 
     // apply the settings
     SDL_SetRenderVSync(renderer, s.vsync ? 1 : 0);
-    if (s.fullscreen) SDL_SetWindowFullscreen(window, true);
+    SDL_SetWindowFullscreen(window, s.fullscreen); // the game's own choice, whatever the launcher was
     pica::set_widescreen(s.widescreen);
     pica::set_resolution_scale(s.resolution);
     pica::set_hud_scale(float(s.hud_size) / 100.0f);

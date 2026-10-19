@@ -1,6 +1,6 @@
 //! ctrx: unpacks a decrypted 3DS dump for analysis.
 //!
-//! Usage: ctrx [--code-only] <dump.3ds|dump.cxi> [out_dir]   (out_dir defaults to ./extracted)
+//! Usage: ctrx [--code-only] <dump.3ds|dump.cxi|dump.cia> [out_dir]   (out_dir defaults to ./extracted)
 //!
 //! Writes exheader.bin, exefs/*, code.bin (decompressed .code), romfs/**,
 //! and info.txt with the memory layout and anything relevant to recompilation.
@@ -20,7 +20,7 @@ fn main() {
     let code_only = args.iter().any(|a| a == "--code-only");
     args.retain(|a| a != "--code-only");
     if args.len() < 2 || args.len() > 3 {
-        eprintln!("usage: ctrx [--code-only] <dump.3ds|dump.cxi> [out_dir]");
+        eprintln!("usage: ctrx [--code-only] <dump.3ds|dump.cxi|dump.cia> [out_dir]");
         std::process::exit(2);
     }
     let out = PathBuf::from(args.get(2).map(String::as_str).unwrap_or("extracted"));

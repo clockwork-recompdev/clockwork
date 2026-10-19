@@ -27,7 +27,10 @@ struct Settings {
     std::string game_path; // the dump played last (or next)
     std::string dump_folder; // where the player's dumps are; the launcher looks there for more
     std::map<uint64_t, std::string> dumps; // the dumps found, by program id
+    std::map<uint64_t, std::string> updates; // their updates found (decrypted .cia/.cxi), by the game's program id
     bool show_launcher = true;
+    bool launcher_fullscreen = true; // the launcher fills the screen (F11 toggles); the game has its own
+    bool menu_music = true;          // the launcher plays Blasters' menu theme (menu_music.h)
 
     // display
     bool single_screen = false, swap_screens = false, picture_in_picture = true;

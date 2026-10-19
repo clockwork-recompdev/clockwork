@@ -34,8 +34,12 @@ Psychic Specters is the most played and tested; the others are newer here.
 
 ## What it does
 
-- **Launcher**: a game library with your title-screen images, dumps found automatically next to
-  any one you pick, a version picker, and settings for display, controls and audio.
+- **Launcher**: fullscreen, styled after Blasters' version select, with its menu theme playing (read
+  from your Blasters dump, or your own `menu-music.wav` in the data folder). A game library whose
+  title screens are captured from your dumps, dumps and updates found automatically next to any one
+  you pick, a version picker, and settings for display, controls and audio.
+- **Updates**: add a game's decrypted update (`.cia` or `.cxi`) and it plays the updated game (Blasters'
+  Moon Rabbit Crew, for one), recompiled from the update's own code.
 - **Graphics**: a GPU renderer on SDL_GPU (Vulkan; Metal and Direct3D 12 by design) with up to 4x
   internal resolution, a 16:9 widescreen top screen that shows more of the scene, adjustable HUD
   size, and one-screen layouts that follow what the game shows (map, menus, battles). A software
@@ -56,6 +60,10 @@ Psychic Specters is the most played and tested; the others are newer here.
 
 Dump each cartridge with GodMode9 (`[C:] GAMECART` → *Dump cart (trimmed)*) and make sure it's
 decrypted (*Decrypt file* if needed). Put the dumps in `dump/` (ignored by git).
+
+Updates: with the update installed on your 3DS, GodMode9's *Title manager* → the update
+(`0004000E...`) → *Build CIA (decrypted)*; or *Decrypt file* on an update `.cia`. Add it in the
+launcher (Browse), or put it next to the game's dump.
 
 ## Building
 

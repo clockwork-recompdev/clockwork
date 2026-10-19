@@ -14,7 +14,8 @@ endif()
 # built when its generated code is there. The launcher hands a dump to whichever one runs it.
 # Each executable's folder is the cache variable <NAME>_GENERATED_DIR (the launcher's builder reads
 # it): build/generated for yw2, build/generated-<name> for the rest. One executable per region's
-# release (see KNOWN_DUMPS in runtime/src/frontend/games.h)
+# release (see KNOWN_DUMPS in runtime/src/frontend/games.h), and one more, <name>_upd, for its
+# code as updated (code_binary in runtime/src/frontend/handoff.h)
 set(CLOCKWORK_EXECUTABLES
     "yw1|Yo-kai Watch"
     "yw2|Yo-kai Watch 2: Psychic Specters"
@@ -49,7 +50,9 @@ foreach(entry IN LISTS CLOCKWORK_EXECUTABLES)
         set(default_dir "${CMAKE_SOURCE_DIR}/build/generated-${name}")
     endif()
     set(${var}_GENERATED_DIR "${default_dir}" CACHE PATH "Generated C for ${what} (the ${name} executable)")
-    list(APPEND CLOCKWORK_GAMES "${name}=${${var}_GENERATED_DIR}")
+    set(${var}_UPD_GENERATED_DIR "${CMAKE_SOURCE_DIR}/build/generated-${name}_upd" CACHE PATH
+        "Generated C for ${what}, updated (the ${name}_upd executable)")
+    list(APPEND CLOCKWORK_GAMES "${name}=${${var}_GENERATED_DIR}" "${name}_upd=${${var}_UPD_GENERATED_DIR}")
 endforeach()
 
 if(WIN32)
@@ -58,6 +61,7 @@ endif()
 
 add_library(runtime OBJECT
     runtime/src/arm_ops.c
+    runtime/src/audio/bcstm.cpp
     runtime/src/audio/dsp_hle.cpp
     runtime/src/dump.cpp
     runtime/src/frontend/autobuild.cpp
@@ -67,6 +71,7 @@ add_library(runtime OBJECT
     runtime/src/frontend/handoff.cpp
     runtime/src/frontend/json.cpp
     runtime/src/frontend/launcher.cpp
+    runtime/src/frontend/menu_music.cpp
     runtime/src/frontend/saves.cpp
     runtime/src/frontend/sdl.cpp
     runtime/src/frontend/settings.cpp
