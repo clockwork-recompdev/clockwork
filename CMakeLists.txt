@@ -12,20 +12,45 @@ endif()
 # Each game is its own executable: the shared runtime plus that game's recompiled code (the
 # output of `recomp emit`, generated from the player's own dump; never committed). A game is
 # built when its generated code is there. The launcher hands a dump to whichever one runs it.
-set(YW2_GENERATED_DIR "${CMAKE_SOURCE_DIR}/build/generated" CACHE PATH
-    "Generated C for Yo-kai Watch 2: Psychic Specters (the yw2 executable)")
-set(YW2BF_GENERATED_DIR "${CMAKE_SOURCE_DIR}/build/generated-yw2bf" CACHE PATH
-    "Generated C for Yo-kai Watch 2: Bony Spirits and Fleshy Souls (the yw2bf executable)")
-set(BLASTERS_GENERATED_DIR "${CMAKE_SOURCE_DIR}/build/generated-blasters" CACHE PATH
-    "Generated C for Yo-kai Watch Blasters: Red Cat Corps and White Dog Squad (the blasters executable)")
-set(YW3_GENERATED_DIR "${CMAKE_SOURCE_DIR}/build/generated-yw3" CACHE PATH
-    "Generated C for Yo-kai Watch 3 (the yw3 executable)")
-set(BUSTERS2_GENERATED_DIR "${CMAKE_SOURCE_DIR}/build/generated-busters2" CACHE PATH
-    "Generated C for Yo-kai Watch Busters 2: Sword and Magnum (the busters2 executable)")
-set(YW1_GENERATED_DIR "${CMAKE_SOURCE_DIR}/build/generated-yw1" CACHE PATH
-    "Generated C for Yo-kai Watch (the yw1 executable)")
-set(CLOCKWORK_GAMES "yw1=${YW1_GENERATED_DIR}" "yw2=${YW2_GENERATED_DIR}" "yw2bf=${YW2BF_GENERATED_DIR}" "blasters=${BLASTERS_GENERATED_DIR}"
-    "yw3=${YW3_GENERATED_DIR}" "busters2=${BUSTERS2_GENERATED_DIR}")
+# Each executable's folder is the cache variable <NAME>_GENERATED_DIR (the launcher's builder reads
+# it): build/generated for yw2, build/generated-<name> for the rest. One executable per region's
+# release (see KNOWN_DUMPS in runtime/src/frontend/games.h)
+set(CLOCKWORK_EXECUTABLES
+    "yw1|Yo-kai Watch"
+    "yw2|Yo-kai Watch 2: Psychic Specters"
+    "yw2bf|Yo-kai Watch 2: Bony Spirits and Fleshy Souls"
+    "blasters|Yo-kai Watch Blasters: Red Cat Corps and White Dog Squad"
+    "yw3|Yo-kai Watch 3"
+    "busters2|Yo-kai Watch Busters 2: Sword and Magnum (Japan)"
+    "yw1_eur|Yo-kai Watch (Europe)"
+    "yw2_eur|Yo-kai Watch 2: Psychic Specters (Europe)"
+    "yw2bf_eur|Yo-kai Watch 2: Bony Spirits and Fleshy Souls (Europe)"
+    "blasters_eur|Yo-kai Watch Blasters: Red Cat Corps and White Dog Squad (Europe)"
+    "yw3_eur|Yo-kai Watch 3 (Europe)"
+    "yw1_jpn|Yo-kai Watch (Japan)"
+    "yw2_jpn|Yo-kai Watch 2: Shin'uchi (Japan)"
+    "yw2bf_jpn|Yo-kai Watch 2: Ganso and Honke (Japan)"
+    "blasters_jpn|Yo-kai Watch Busters: Red Cat Corps and White Dog Squad (Japan)"
+    "yw3_jpn|Yo-kai Watch 3: Sushi and Tempura (Japan)"
+    "yw3sk_jpn|Yo-kai Watch 3: Sukiyaki (Japan)"
+    "yw1_kor|Yo-kai Watch (Korea)"
+    "yw2_kor|Yo-kai Watch 2: Psychic Specters (Korea)"
+    "yw2bf_kor|Yo-kai Watch 2: Bony Spirits and Fleshy Souls (Korea)"
+    "blasters_kor|Yo-kai Watch Blasters: Red Cat Corps and White Dog Squad (Korea)")
+set(CLOCKWORK_GAMES "")
+foreach(entry IN LISTS CLOCKWORK_EXECUTABLES)
+    string(REPLACE "|" ";" parts "${entry}")
+    list(GET parts 0 name)
+    list(GET parts 1 what)
+    string(TOUPPER "${name}" var)
+    if(name STREQUAL "yw2")
+        set(default_dir "${CMAKE_SOURCE_DIR}/build/generated")
+    else()
+        set(default_dir "${CMAKE_SOURCE_DIR}/build/generated-${name}")
+    endif()
+    set(${var}_GENERATED_DIR "${default_dir}" CACHE PATH "Generated C for ${what} (the ${name} executable)")
+    list(APPEND CLOCKWORK_GAMES "${name}=${${var}_GENERATED_DIR}")
+endforeach()
 
 if(WIN32)
     add_compile_definitions(NOMINMAX WIN32_LEAN_AND_MEAN) # windows.h's min/max macros break std::min

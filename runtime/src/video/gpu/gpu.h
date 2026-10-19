@@ -31,6 +31,12 @@ void before_cpu_read(uint32_t addr, uint32_t size);
 // the CPU wrote to [addr, addr + size): GPU copies of that memory must be reloaded
 void invalidate(uint32_t addr, uint32_t size);
 
+// a VBlank: the top screen's next frame while interpolating (see "frame interpolation" in gpu.cpp)
+void vblank();
+// the top screen's frame for this VBlank while interpolating (whichever LCD framebuffer the game
+// shows); null otherwise
+SDL_GPUTexture *top_frame(int *width, int *height);
+
 // the latest GPU-rendered image in an LCD framebuffer (upright, screen orientation), if any
 SDL_GPUTexture *lcd_frame(uint32_t addr, int *width, int *height);
 

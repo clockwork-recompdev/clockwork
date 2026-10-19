@@ -489,6 +489,15 @@ bool hand_off_or_explain(const std::string &dump_path, std::string *problem) {
 
 void run(void (*start)(const char *dump), const char *cli_dump, bool force_launcher, bool play) {
     game_start = start;
+    // SDL's internal checks (on in some distributions' builds of SDL) go to the log instead of
+    // stopping everything with a dialog: the window's renderer trips one for a frame whenever the
+    // window is resized under it ("Viewport size exceeds current render target dimensions")
+    SDL_SetAssertionHandler(
+        [](const SDL_AssertData *d, void *) {
+            LOG("SDL assertion: %s (%s:%d, %s)", d->condition, d->filename, d->linenum, d->function);
+            return SDL_ASSERTION_ALWAYS_IGNORE;
+        },
+        nullptr);
     Settings &s = settings();
     if (std::getenv("YW2_HEADLESS")) {
         if (!cli_dump) fatal("headless mode needs the dump path on the command line");
@@ -588,6 +597,8 @@ void run(void (*start)(const char *dump), const char *cli_dump, bool force_launc
     pica::set_resolution_scale(s.resolution);
     pica::set_hud_scale(float(s.hud_size) / 100.0f);
     pica::set_camera_zoom(float(s.camera_zoom) / 100.0f);
+    pica::set_frame_interpolation(s.frame_interpolation);
+    if (const char *e = std::getenv("YW2_INTERP")) pica::set_frame_interpolation(std::atoi(e) != 0);
     if (const char *e = std::getenv("YW2_ZOOM")) pica::set_camera_zoom(float(std::atoi(e)) / 100.0f);
     if (const char *e = std::getenv("YW2_HUD")) pica::set_hud_scale(float(std::atoi(e)) / 100.0f);
     if (const char *e = std::getenv("YW2_SCALE")) pica::set_resolution_scale(std::atoi(e)); // test overrides
@@ -829,10 +840,10 @@ void run(void (*start)(const char *dump), const char *cli_dump, bool force_launc
                 std::sscanf(spec.c_str() + c + 1, "%d:%d:%d", &at, &every, &count);
             }
             if (top_frames >= at + shots_taken * every) {
-                if (SDL_Surface *surface = SDL_RenderReadPixels(renderer, nullptr)) {
-                    SDL_SavePNG(surface, (prefix + std::to_string(shots_taken) + ".png").c_str());
-                    SDL_DestroySurface(surface);
-                }
+                std::string file = prefix + std::to_string(shots_taken) + ".png";
+                SDL_Surface *surface = SDL_RenderReadPixels(renderer, nullptr);
+                if (!surface || !SDL_SavePNG(surface, file.c_str())) LOG("window screenshot %s: %s", file.c_str(), SDL_GetError());
+                if (surface) SDL_DestroySurface(surface);
                 if (++shots_taken >= count) std::_Exit(0);
             }
         }

@@ -201,6 +201,8 @@ struct DrawGeom {
     int applied; // the side it was shifted to when drawn
     int own;     // the side its own position says (touching an edge), ignoring its neighbours
     bool pins;   // reaches past the middle (a dialogue box): what it's part of stays centered
+    bool alone;      // part of no group: particles spread over the scene, or a full-width bar (see side_of)
+    bool full_width; // reaches both sides (a banner, a title bar): stretched to the wide screen's edges
 };
 extern DrawGeom draw_geom;
 struct ShadowTarget {

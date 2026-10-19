@@ -110,7 +110,9 @@ struct Gsp : Service {
         for (int screen = 0; screen < 2; screen++) {
             if (!lcd[screen].addr) continue;
             int gw, gh;
-            if (SDL_GPUTexture *frame = pica::gpu::lcd_frame(lcd[screen].addr, &gw, &gh)) {
+            SDL_GPUTexture *frame = screen == 0 ? pica::gpu::top_frame(&gw, &gh) : nullptr;
+            if (!frame) frame = pica::gpu::lcd_frame(lcd[screen].addr, &gw, &gh);
+            if (frame) {
                 frontend::present_gpu(screen, frame, gw, gh);
                 continue;
             }
@@ -131,6 +133,7 @@ struct Gsp : Service {
         if (vblank_started) return;
         vblank_started = true;
         kernel::schedule_periodic(VBLANK_NS, [this] {
+            pica::gpu::vblank();
             apply_swaps();
             present();
             raise(PDC0);

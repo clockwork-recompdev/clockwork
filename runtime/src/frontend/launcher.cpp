@@ -467,7 +467,8 @@ std::string game_name(uint64_t program_id) {
     const KnownDump *d = find_dump(program_id);
     const GameInfo *g = d ? find_game(d->game) : nullptr;
     if (!g) return "another game";
-    return std::string(g->title) + (*d->version ? ": " : "") + d->version;
+    std::string v = version_label(*d);
+    return std::string(g->title) + (v.empty() ? "" : ": ") + v;
 }
 
 // a text field editing `value`, up to the relay's limit
@@ -794,7 +795,8 @@ bool run_launcher(SDL_Window *window, SDL_Renderer *renderer, const std::string 
         std::string dump_name; // "Yo-kai Watch 2: Bony Spirits"
         if (dump_route.dump) {
             const GameInfo *g = find_game(dump_route.dump->game);
-            dump_name = std::string(g ? g->title : "?") + (*dump_route.dump->version ? ": " : "") + dump_route.dump->version;
+            std::string v = version_label(*dump_route.dump);
+            dump_name = std::string(g ? g->title : "?") + (v.empty() ? "" : ": ") + v;
         }
 
         ask_relay(rooms_state, s);
@@ -867,7 +869,10 @@ bool run_launcher(SDL_Window *window, SDL_Renderer *renderer, const std::string 
                                 ImGui::PushStyleColor(ImGuiCol_ButtonHovered, BLUE);
                                 ImGui::PushStyleColor(ImGuiCol_Text, WHITE);
                             }
-                            if (ImGui::Button(d->version)) s.game_path = s.dumps[d->program_id];
+                            std::string label = version_label(*d);
+                            if (label.empty()) label = region_name(d->region);
+                            if (ImGui::Button((label + "##" + std::to_string(d->program_id)).c_str()))
+                                s.game_path = s.dumps[d->program_id];
                             if (on) ImGui::PopStyleColor(3);
                         }
                     }
@@ -950,6 +955,14 @@ bool run_launcher(SDL_Window *window, SDL_Renderer *renderer, const std::string 
                                        "emulator's save folder for this game.");
                     ImGui::PopStyleColor();
                 }
+                if (dump_route.dump && dump_route.dump->region == Region::EUR) {
+                    section("Language");
+                    static const char *LANGUAGES[] = {"English", "French", "German", "Italian", "Spanish"};
+                    int lang = std::clamp(s.language, 1, 5) - 1;
+                    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12);
+                    if (ImGui::Combo("Game language", &lang, LANGUAGES, 5)) s.language = lang + 1;
+                    ImGui::TextDisabled("European releases: the language the console is set to.");
+                }
                 section("Startup");
                 ImGui::Checkbox("Show this launcher when the game starts", &s.show_launcher);
                 ImGui::TextDisabled("Hold Shift while starting, or pass --launcher, to bring it back.");
@@ -1005,6 +1018,9 @@ bool run_launcher(SDL_Window *window, SDL_Renderer *renderer, const std::string 
                 ImGui::SetNextItemWidth(ImGui::GetFontSize() * 18);
                 ImGui::SliderInt("Camera zoom", &s.camera_zoom, 60, 100, "%d%%");
                 ImGui::TextDisabled("Widescreen: below 100%% pulls the camera back to show more of the scene.");
+                ImGui::Checkbox("Frame interpolation (60 fps)", &s.frame_interpolation);
+                ImGui::TextDisabled("GPU renderer: draws in-between frames for games running at 30 fps. "
+                                    "Smoother, about two frames (33 ms) later.");
                 section("Window");
                 ImGui::Checkbox("Fullscreen", &s.fullscreen);
                 ImGui::Checkbox("VSync", &s.vsync);

@@ -38,6 +38,7 @@ struct Settings {
     int hud_size = 80;  // percent: the top screen's dialogue boxes and other 2D HUD
     int camera_zoom = 90; // percent, in widescreen: the 3D scene's size (less shows more of it)
     bool gpu_renderer = true; // draw on the GPU (SDL_GPU); off: the software renderer
+    bool frame_interpolation = false; // GPU renderer: 30 fps games shown at 60 (in-between frames)
     bool prefer_integrated_gpu = false; // on laptops with two GPUs: the power-saving one
     // one-screen layouts chosen with F5: "<game>.<kind of scene>" -> layout (see sdl.cpp)
     std::map<std::string, std::string> layouts;
@@ -53,6 +54,10 @@ struct Settings {
     std::string relay;        // "host[:port]" of a relay; empty: this PC only (two windows)
     std::string player_name;  // shown to the others in the room
     std::string room, room_password;
+
+    // European releases: the language the console is set to (3DS codes: 1 English, 2 French,
+    // 3 German, 4 Italian, 5 Spanish), which the game is shown in
+    int language = 1;
 
     int keys[CONTROL_COUNT]; // SDL_Scancode
     int pad[CONTROL_COUNT];  // controller binding codes

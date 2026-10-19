@@ -48,8 +48,9 @@ struct Frd : Service {
         }
         case 0x0006: { // GetMyProfile -> region, country, area, language, platform (8 bytes)
             auto r = req.reply(3, 0);
-            r.push(0x00310001); // USA, country 49 (United States)
-            r.push(0x00000001); // English
+            const ConsoleIdentity &id = console_identity();
+            r.push(uint32_t(id.region) | uint32_t(id.country) << 8 | uint32_t(id.language) << 24);
+            r.push(0x00000001);
             break;
         }
         case 0x0009: { // GetMyScreenName -> 11 UTF-16 units

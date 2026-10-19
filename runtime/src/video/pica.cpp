@@ -346,6 +346,30 @@ int side_of(const std::vector<Vertex> &tris) {
     }
     auto overlaps = [&](const AnchoredBox &b) { return xlo < b.xhi && b.xlo < xhi && ylo < b.yhi && b.ylo < yhi; };
     bool at_side = ylo <= -0.97f || yhi >= 0.97f, at_top_or_bottom = xlo <= -0.97f || xhi >= 0.97f;
+    // across the whole width (a banner along the bottom, a menu's title bar): it stretches to the
+    // new edges, so it takes no side, and what's on it keeps to its own (an icon at the banner's end)
+    if (ylo <= -0.95f && yhi >= 0.95f) {
+        stats.anchor = 0;
+        draw_geom = {true, xlo, xhi, ylo, yhi, 0, 0, false, true, true};
+        return 0;
+    }
+    // particles scattered over the scene (Blasters' battle sparkles: one draw, many small quads),
+    // not a piece of HUD: over half the screen both ways, made of triangles far smaller than that.
+    // Its box overlaps everything, so it neither takes a side nor keeps the HUD it covers from its
+    // own. A menu window as large has large triangles and still holds its pieces together
+    if (xhi - xlo > 1.0f && yhi - ylo > 1.0f && tris.size() >= 24) {
+        float largest = 0;
+        for (size_t i = 0; i + 2 < tris.size(); i += 3) {
+            const float *a = tris[i].a, *b = tris[i + 1].a, *c = tris[i + 2].a;
+            largest = std::max(largest, std::fabs((b[POS] - a[POS]) * (c[POS + 1] - a[POS + 1]) -
+                                                  (b[POS + 1] - a[POS + 1]) * (c[POS] - a[POS])) / 2);
+        }
+        if (largest < 0.02f * (xhi - xlo) * (yhi - ylo)) {
+            stats.anchor = 0;
+            draw_geom = {true, xlo, xhi, ylo, yhi, 0, 0, false, true, false};
+            return 0;
+        }
+    }
     int side = 0;
     if (ylo <= -0.97f && yhi < 0.0f) side = -1;
     else if (yhi >= 0.97f && ylo > 0.0f) side = 1;
@@ -360,7 +384,7 @@ int side_of(const std::vector<Vertex> &tris) {
     if (side) anchored.push_back({xlo, xhi, ylo, yhi, side});
     else if (!at_side) centered.push_back({xlo, xhi, ylo, yhi, 0});
     stats.anchor = side;
-    draw_geom = {true, xlo, xhi, ylo, yhi, side, own, at_side && !own};
+    draw_geom = {true, xlo, xhi, ylo, yhi, side, own, at_side && !own, false, false};
     return side;
 }
 

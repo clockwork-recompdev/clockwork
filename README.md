@@ -15,14 +15,20 @@ Every game is its own executable, built from one shared runtime when that game's
 is present. Versions that share code share an executable, and any executable's launcher hands a
 dump to the one that runs it.
 
-| Game | Versions (USA unless noted) | Executable |
-|---|---|---|
-| Yo-kai Watch | | `yw1` |
-| Yo-kai Watch 2 | Psychic Specters | `yw2` |
-| | Bony Spirits, Fleshy Souls | `yw2bf` |
-| Yo-kai Watch Blasters | Red Cat Corps, White Dog Squad | `blasters` |
-| Yo-kai Watch 3 | | `yw3` |
-| Yo-kai Watch Busters 2 | Sword, Magnum (Japan) | `busters2` |
+| Game | Versions | USA | Europe | Japan | Korea |
+|---|---|---|---|---|---|
+| Yo-kai Watch | | `yw1` | `yw1_eur` | `yw1_jpn` | `yw1_kor` |
+| Yo-kai Watch 2 | Psychic Specters (Shin'uchi) | `yw2` | `yw2_eur` | `yw2_jpn` | `yw2_kor` |
+| | Bony Spirits, Fleshy Souls (Ganso, Honke) | `yw2bf` | `yw2bf_eur` | `yw2bf_jpn` | `yw2bf_kor` |
+| Yo-kai Watch Blasters (Busters) | Red Cat Corps, White Dog Squad | `blasters` | `blasters_eur` | `blasters_jpn` | `blasters_kor` |
+| Yo-kai Watch 3 | Sushi, Tempura in Japan | `yw3` | `yw3_eur` | `yw3_jpn` | |
+| | Sukiyaki | | | `yw3sk_jpn` | |
+| Yo-kai Watch Busters 2 | Sword, Magnum | | | `busters2` | |
+
+Each region's release is its own code, so it has its own executable. The console reports the
+dump's region to the game; European releases are shown in the language picked on the Library tab.
+The USA releases (and Busters 2) are the tested ones; the other regions are recognized and built
+the same way but are new.
 
 Psychic Specters is the most played and tested; the others are newer here.
 
@@ -33,7 +39,8 @@ Psychic Specters is the most played and tested; the others are newer here.
 - **Graphics**: a GPU renderer on SDL_GPU (Vulkan; Metal and Direct3D 12 by design) with up to 4x
   internal resolution, a 16:9 widescreen top screen that shows more of the scene, adjustable HUD
   size, and one-screen layouts that follow what the game shows (map, menus, battles). A software
-  renderer stays as a fallback.
+  renderer stays as a fallback. Frame interpolation (Graphics settings) shows the games' 30 fps
+  at 60 by drawing an in-between frame for each one, at the cost of about two frames of delay.
 - **Mods**: install from GameBanana in the launcher, or drop them in yourself. They're applied as
   the game starts and never change the dump: whole RomFS files (LayeredFS-style translations) and
   files inside Level-5's archives.
@@ -84,7 +91,7 @@ cmake -B build -G Ninja && cmake --build build
 | Executable | Generated code goes in |
 |---|---|
 | `yw2` | `build/generated` |
-| `yw1`, `yw2bf`, `blasters`, `yw3`, `busters2` | `build/generated-<executable>` |
+| every other one (`yw2bf`, `yw2_eur`, ...) | `build/generated-<executable>` |
 
 CMake builds whichever games have generated code (each folder is a cache variable, e.g.
 `-DYW3_GENERATED_DIR=...`), plus `clockwork-relay`. `extracted/<game>/info.txt` summarizes a dump's

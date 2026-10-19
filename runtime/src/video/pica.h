@@ -47,6 +47,8 @@ void set_hud_scale(float scale);
 // widescreen: the 3D camera's zoom, 0.6-1 (1: the game's own; less pulls back to show more of the
 // scene around the middle as well as at the sides)
 void set_camera_zoom(float zoom);
+// GPU renderer: draws an in-between frame for games running at 30 fps, so they're shown at 60
+void set_frame_interpolation(bool on);
 // after a GX MemoryFill of [start, end): clears the matching widescreen shadow too
 void wide_memory_filled(uint32_t start, uint32_t end);
 // the enhanced version of the frame in an LCD framebuffer, if it came from a shadow target:

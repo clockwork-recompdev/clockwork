@@ -1,7 +1,11 @@
-// cfg:u: system settings. Answers with a US-region, English 3DS with defaults for the
-// config blocks games read; unknown blocks read as zeros (and are logged).
+// cfg:u: system settings. Answers as a 3DS of the running game's region (in English for USA
+// releases, Japanese and Korean for those, the launcher's language for European ones) with defaults
+// for the config blocks games read; unknown blocks read as zeros (and are logged).
 #include "service.h"
 
+#include "dump.h"
+#include "frontend/games.h"
+#include "frontend/settings.h"
 #include "log.h"
 #include "memory.h"
 #include "platform.h"
@@ -14,7 +18,20 @@
 namespace hle {
 namespace {
 
-constexpr uint8_t REGION_USA = 1, LANGUAGE_ENGLISH = 1, COUNTRY_USA = 49;
+constexpr uint8_t REGION_JPN = 0, REGION_USA = 1, REGION_EUR = 2, REGION_KOR = 5;
+constexpr uint8_t LANGUAGE_JAPANESE = 0, LANGUAGE_ENGLISH = 1, LANGUAGE_KOREAN = 7;
+constexpr uint8_t COUNTRY_JAPAN = 1, COUNTRY_USA = 49, COUNTRY_KOREA = 136;
+
+// a European console's country for its language: one where that language is spoken
+uint8_t european_country(uint8_t language) {
+    switch (language) {
+    case 2: return 77;  // France
+    case 3: return 78;  // Germany
+    case 4: return 83;  // Italy
+    case 5: return 105; // Spain
+    default: return 110; // United Kingdom
+    }
+}
 
 std::vector<uint8_t> utf16(const char *s, size_t bytes) {
     std::vector<uint8_t> out(bytes);
@@ -37,8 +54,8 @@ struct Cfg : Service {
         blocks[0x00070001] = {1};                                     // sound output: stereo
         blocks[0x000A0000] = utf16("Player", 0x1C);                   // username
         blocks[0x000A0001] = {3, 25};                                 // birthday: month, day
-        blocks[0x000A0002] = {LANGUAGE_ENGLISH};                      // language
-        blocks[0x000B0000] = {0, 0, 0, COUNTRY_USA};                  // country info
+        blocks[0x000A0002] = {console_identity().language};           // language
+        blocks[0x000B0000] = {0, 0, 0, console_identity().country};   // country info
         blocks[0x000C0000] = std::vector<uint8_t>(0xC0, 0);           // parental controls: none
         blocks[0x000D0000] = bytes_of<uint16_t>({0x7F, 0x7F});        // EULA version accepted
         blocks[0x000F0004] = {0, 0, 0, 0};                            // system model: 3DS
@@ -68,7 +85,7 @@ struct Cfg : Service {
         }
         case 0x0002: { // SecureInfoGetRegion
             auto r = req.reply(2, 0);
-            r.push(REGION_USA);
+            r.push(console_identity().region);
             break;
         }
         case 0x0003: { // GenHashConsoleUnique(salt) -> a stable per-console hash
@@ -81,7 +98,7 @@ struct Cfg : Service {
         }
         case 0x0004: { // GetRegionCanadaUSA
             auto r = req.reply(2, 0);
-            r.push(1);
+            r.push(console_identity().region == REGION_USA ? 1 : 0);
             break;
         }
         case 0x0005: { // GetSystemModel: 0 = 3DS
@@ -101,6 +118,23 @@ struct Cfg : Service {
 };
 
 } // namespace
+
+const ConsoleIdentity &console_identity() {
+    static const ConsoleIdentity id = [] {
+        const frontend::KnownDump *d = frontend::find_dump(dump().program_id());
+        switch (d ? d->region : frontend::Region::USA) {
+        case frontend::Region::JPN: return ConsoleIdentity{REGION_JPN, COUNTRY_JAPAN, LANGUAGE_JAPANESE};
+        case frontend::Region::KOR: return ConsoleIdentity{REGION_KOR, COUNTRY_KOREA, LANGUAGE_KOREAN};
+        case frontend::Region::EUR: {
+            int l = frontend::settings().language;
+            uint8_t language = l >= 1 && l <= 5 ? uint8_t(l) : LANGUAGE_ENGLISH;
+            return ConsoleIdentity{REGION_EUR, european_country(language), language};
+        }
+        default: return ConsoleIdentity{REGION_USA, COUNTRY_USA, LANGUAGE_ENGLISH};
+        }
+    }();
+    return id;
+}
 
 void register_cfg() { register_service({"cfg:u", "cfg:s", "cfg:i"}, std::make_shared<Cfg>()); }
 

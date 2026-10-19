@@ -60,6 +60,15 @@ struct Service : std::enable_shared_from_this<Service> {
     virtual void handle(Request &req) = 0;
 };
 
+// What the console says about itself, from the running game's region: a game checks the console's
+// region and reads its language (European releases offer several: the launcher's choice)
+struct ConsoleIdentity {
+    uint8_t region;   // SecureInfoGetRegion: 0 JPN, 1 USA, 2 EUR, 5 KOR
+    uint8_t country;  // the country config block's code
+    uint8_t language; // 0 Japanese, 1 English, 2 French, 3 German, 4 Italian, 5 Spanish, 7 Korean
+};
+const ConsoleIdentity &console_identity();
+
 // stops with a message naming the service and command; for commands not implemented yet
 [[noreturn]] void unimplemented(const Service &s, const Request &req);
 

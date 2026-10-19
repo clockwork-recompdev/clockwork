@@ -265,7 +265,8 @@ std::string version_name(uint64_t id) {
     const KnownDump *d = find_dump(id);
     const GameInfo *g = d ? find_game(d->game) : nullptr;
     if (!d) return "?";
-    return *d->version ? d->version : g ? g->title : d->game;
+    std::string v = version_label(*d);
+    return !v.empty() ? v : g ? g->title : d->game;
 }
 
 // One build's progress, shared by the steps and the log
@@ -490,7 +491,8 @@ void start_build(const std::shared_ptr<BuildJob> &job, const std::string &binary
         title = g ? g->title : binary;
         std::string versions;
         for (auto &[id, path] : dumps)
-            if (const KnownDump *k = find_dump(id); k && *k->version) versions += (versions.empty() ? "" : ", ") + std::string(k->version);
+            if (const KnownDump *k = find_dump(id); k && !version_label(*k).empty())
+                versions += (versions.empty() ? "" : ", ") + version_label(*k);
         if (!versions.empty()) title += ": " + versions;
     }
     const Builder &b = builder();

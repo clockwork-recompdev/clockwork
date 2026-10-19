@@ -125,6 +125,7 @@ void Settings::load() {
         else if (k == "hud_size") hud_size = std::atoi(v.c_str());
         else if (k == "camera_zoom") camera_zoom = std::atoi(v.c_str());
         else if (k == "gpu_renderer") gpu_renderer = b;
+        else if (k == "frame_interpolation") frame_interpolation = b;
         else if (k == "prefer_integrated_gpu") prefer_integrated_gpu = b;
         else if (k == "volume") volume = std::atoi(v.c_str());
         else if (k == "audio_device") audio_device = v;
@@ -134,6 +135,7 @@ void Settings::load() {
         else if (k == "player_name") player_name = v;
         else if (k == "room") room = v;
         else if (k == "room_password") room_password = v;
+        else if (k == "language") language = std::clamp(std::atoi(v.c_str()), 1, 5);
         else if (k == "audio_latency") audio_latency = std::clamp(std::atoi(v.c_str()), 0, 2);
         else
             for (int i = 0; i < CONTROL_COUNT; i++) {
@@ -165,12 +167,14 @@ void Settings::save() const {
       << "hud_size=" << hud_size << "\n"
       << "camera_zoom=" << camera_zoom << "\n"
       << "gpu_renderer=" << gpu_renderer << "\n"
+      << "frame_interpolation=" << frame_interpolation << "\n"
       << "prefer_integrated_gpu=" << prefer_integrated_gpu << "\n"
       << "volume=" << volume << "\n"
       << "audio_device=" << audio_device << "\n"
       << "mute_in_background=" << mute_in_background << "\n"
       << "mono=" << mono << "\n"
       << "audio_latency=" << audio_latency << "\n"
+      << "language=" << language << "\n"
       << "relay=" << relay << "\n"
       << "player_name=" << player_name << "\n"
       << "room=" << room << "\n"

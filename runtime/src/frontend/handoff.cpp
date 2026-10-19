@@ -56,8 +56,8 @@ std::string route_problem(const Route &r) {
     case Route::UNKNOWN: return "Clockwork doesn't recognize that game (or that region of it) yet.";
     case Route::NOT_BUILT: {
         const GameInfo *g = find_game(r.dump->game);
-        std::snprintf(buf, sizeof buf, "%s%s%s isn't built yet.", g ? g->title : "?", *r.dump->version ? ": " : "",
-                      r.dump->version);
+        std::string v = version_label(*r.dump);
+        std::snprintf(buf, sizeof buf, "%s%s%s isn't built yet.", g ? g->title : "?", v.empty() ? "" : ": ", v.c_str());
         return buf;
     }
     default: return "";

@@ -11,6 +11,10 @@
 // adjustment happen per triangle here. Each draw records its pipeline (blend/depth/stencil/
 // mask state), textures and a uniform block for the uber-shader (TEV, lighting, fog, alpha
 // test). A command list's draws are recorded into one command buffer when it ends.
+//
+// Frame interpolation (see the section below): the games draw at 30 fps; each draw is also drawn a
+// second time, halfway between its place in the last frame and this one, into twin surfaces, which
+// make an in-between frame shown one VBlank before the game's own (through a short queue).
 #include "gpu.h"
 
 #include "log.h"
@@ -27,6 +31,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <map>
 #include <memory>
 #include <string>
@@ -92,6 +97,10 @@ struct Surface {
     // changes, the CPU put something else there (memory is reused, e.g. for streamed map data)
     uint64_t guest_hash;
     uint64_t last_used; // use_clock when last drawn to or sampled
+    // frame interpolation: the same image as drawn halfway between the last frame and this one
+    // (same size and format), holding this frame's in-between image when twin_frame is the frame
+    SDL_GPUTexture *twin = nullptr;
+    uint64_t twin_frame = UINT64_MAX;
 
     uint32_t bpp() const { return depth ? (format == 0 ? 2 : format == 3 ? 4 : 3) : fb_bpp(format); }
     uint32_t bytes() const { return width * height * bpp(); }
@@ -326,6 +335,11 @@ struct DrawRec {
     FragUniforms fu;
     float depth_map[4];
     uint32_t first, count;
+    // frame interpolation: the draw across frames (see match_key), its triangles before culling, and
+    // where its in-between vertices are (in `vertices`, after the batch's own)
+    uint64_t match = 0;
+    uint32_t tris = 0, ifirst = 0;
+    bool interpolated = false;
 };
 
 struct TextureUpload {
@@ -352,6 +366,14 @@ bool cur_skip = true;
 float cur_ky = 1.0f; // widescreen: clip-space y factor for triangles that keep their size
 uint32_t cur_cull = 0;
 uint32_t cur_tex0 = 0; // texture unit 0's address, to recognize a HUD element between frames
+uint32_t cur_tris = 0; // triangles of the current draw so far, culled or not
+// a viewport reaching past its target (see fit_viewport): clip-space x and y become
+// a * x + b * w, so the triangles land where the game's viewport would have put them
+bool cur_refit = false;
+float refit_ax = 1, refit_bx = 0, refit_ay = 1, refit_by = 0;
+// per triangle in `vertices`: its index among its draw's triangles before culling, which is the
+// same from frame to frame while the vertex count after culling isn't (frame interpolation)
+std::vector<uint32_t> tri_ids;
 
 // decodes a guest color buffer to RGBA rows in memory order
 std::vector<uint8_t> read_guest(const Surface &s) {
@@ -574,6 +596,7 @@ void trim_caches(uint64_t idle) {
     std::erase_if(surfaces, [&](const std::unique_ptr<Surface> &s) {
         if (use_clock - s->last_used <= idle || s->drawn) return false;
         SDL_ReleaseGPUTexture(dev, s->tex);
+        if (s->twin) SDL_ReleaseGPUTexture(dev, s->twin);
         return true;
     });
 }
@@ -724,12 +747,235 @@ SDL_GPUShader *make_shader(const unsigned char *code, size_t size, SDL_GPUShader
 
 // ---- LCD frames ----
 
+// Each LCD framebuffer's GPU images, round robin
 struct LcdFrames {
     SDL_GPUTexture *tex[3] = {};
     int w = 0, h = 0, next = 0, latest = -1;
 };
 std::map<uint32_t, LcdFrames> lcd; // by guest virtual address of the LCD framebuffer
 SDL_Mutex *lcd_lock;
+
+// ---- frame interpolation ----
+//
+// The games run at 30 fps: a new frame every second VBlank. Between two of them, an in-between
+// frame is drawn and shown at the VBlank in between, so motion runs at 60. The game itself is
+// unchanged; its frames are shown one VBlank later than they would be.
+//
+// Triangles reach the renderer in clip space (shaded on the CPU), so putting a vertex halfway
+// between where it was last frame and where it is now is the same as drawing it with matrices
+// halfway between (clip = M v is linear in M): the camera and every model move smoothly, skinned
+// ones too. A draw is matched to last frame's by what it draws (match_key), and each triangle by
+// its index before culling. What has no match (new this frame, text that changed) is drawn where
+// it is now; a draw that jumped across the screen (a camera cut) too.
+//
+// The in-between frame is drawn alongside the game's, batch by batch, into twins of the surfaces
+// drawn to, so clears, render-to-texture and the order of passes are the game's own. A twin starts
+// each frame as a copy of its surface, before the frame first draws to it.
+//
+// The game keeps 30 fps on average, but its frames don't land on the VBlanks evenly: one done just
+// after a VBlank takes three, the next one then only one. So the top screen's frames (in-between
+// and the game's, alternately) go through a short queue, one per VBlank (TopQueue), which rides
+// out a late frame, whichever framebuffer the game put them in.
+
+std::atomic<bool> interp_wanted{false};
+bool interp_on = false;    // recording frames (the setting, as of the frame being drawn)
+bool interp_this = false;  // this frame gets an in-between frame: the last one took two VBlanks
+uint64_t frame_serial = 0; // top-screen frames done, for Surface::twin_frame
+std::atomic<uint64_t> vblanks{0};
+uint64_t last_frame_vblank = 0;
+float cadence = 1;               // VBlanks per top-screen frame, averaged
+constexpr float INTERP_T = 0.5f; // halfway: a frame every second VBlank
+constexpr float JUMP = 0.5f;     // mean movement (in clip-space units) past which a draw jumped
+
+// a frame's draws as drawn: for each, by match key, its triangles before culling and where each
+// one's three vertices are in `verts` (-1: culled)
+struct FrameRecord {
+    struct Draw {
+        uint32_t tris, slots; // count, and its first entry in `slots`
+    };
+    std::unordered_map<uint64_t, Draw> draws;
+    std::vector<int32_t> slots;
+    std::vector<GpuVertex> verts;
+    void clear() { draws.clear(), slots.clear(), verts.clear(); }
+};
+FrameRecord last_frame, this_frame;
+std::unordered_map<uint64_t, uint32_t> occurrences; // this frame's draws so far, by key without occurrence
+int moved_3d = 0, jumped_3d = 0; // this frame's matched 3D draws, and those that jumped
+// for YW2_FPS: in-between frames made, and draws drawn into them (matched to last frame's, jumped)
+struct InterpStats {
+    int frames = 0, mids = 0, draws = 0, matched = 0, jumped = 0;
+    int intervals[4] = {}; // frames that took 1, 2, 3, 4+ VBlanks
+    int not_planned = 0, no_twin = 0, cut = 0; // top frames without an in-between one, by why
+    int repeats = 0, dropped = 0;              // VBlanks that showed nothing new; frames dropped to catch up
+} interp_stats;
+
+uint64_t mix(uint64_t h, uint64_t v) { return (h ^ v) * 0x9E3779B97F4A7C15ull + (h >> 29); }
+
+// the current draw in any frame: what it draws to and with, its triangles before culling, and how
+// many draws like it came before it this frame
+uint64_t match_key(const DrawRec &d) {
+    uint64_t h = mix(mix(mix(1, d.color->addr), cur_tex0), cur_tris);
+    h = mix(mix(h, uint64_t(uintptr_t(d.pipeline))), regs[VS_ENTRY]);
+    return mix(h, occurrences[h]++);
+}
+
+bool twin_live(const Surface *s) { return s->twin && s->twin_frame == frame_serial; }
+
+// `out` (a copy of `now`) moved `t` of the way from `last` to `now`: position, and the normal
+// quaternion and view vector that light it
+void lerp_vertex(GpuVertex &out, const GpuVertex &last, const GpuVertex &now, float t) {
+    float dot = 0;
+    for (int c = 0; c < 4; c++) dot += last.quat[c] * now.quat[c];
+    float q = dot < 0 ? -1.0f : 1.0f; // q and -q are the same rotation: take the near one
+    for (int c = 0; c < 4; c++) {
+        out.pos[c] = last.pos[c] + (now.pos[c] - last.pos[c]) * t;
+        out.quat[c] = q * last.quat[c] + (now.quat[c] - q * last.quat[c]) * t;
+    }
+    for (int c = 0; c < 3; c++) out.view[c] = last.view[c] + (now.view[c] - last.view[c]) * t;
+}
+
+// records the batch's draws for the next frame and, in a frame that gets an in-between frame,
+// appends their in-between vertices to `vertices`
+void interpolate_batch() {
+    std::vector<GpuVertex> mid;
+    for (DrawRec &d : batch) {
+        uint32_t slots = uint32_t(this_frame.slots.size());
+        this_frame.slots.resize(slots + d.tris, -1);
+        for (uint32_t v = d.first; v < d.first + d.count; v += 3) {
+            this_frame.slots[slots + tri_ids[v / 3]] = int32_t(this_frame.verts.size());
+            this_frame.verts.insert(this_frame.verts.end(), vertices.begin() + v, vertices.begin() + v + 3);
+        }
+        this_frame.draws[d.match] = {d.tris, slots};
+        // the bottom screen shows the game's frames as they come
+        d.interpolated = interp_this && d.color->height != 320;
+        if (!d.interpolated) continue;
+        d.ifirst = uint32_t(vertices.size() + mid.size());
+        size_t at = mid.size();
+        mid.insert(mid.end(), vertices.begin() + d.first, vertices.begin() + d.first + d.count);
+        interp_stats.draws++;
+        auto it = last_frame.draws.find(d.match);
+        if (it == last_frame.draws.end() || it->second.tris != d.tris) continue;
+        interp_stats.matched++;
+        auto last_slot = [&](uint32_t v) { return last_frame.slots[it->second.slots + tri_ids[v / 3]]; };
+        bool perspective = false;
+        double moved = 0;
+        int n = 0;
+        for (uint32_t v = d.first; v < d.first + d.count; v += 3) {
+            int32_t s = last_slot(v);
+            if (s < 0) continue;
+            for (int k = 0; k < 3; k++) {
+                const GpuVertex &a = last_frame.verts[size_t(s) + k], &b = vertices[v + k];
+                perspective |= std::fabs(b.pos[3] - 1.0f) > 1e-4f;
+                if (a.pos[3] <= 1e-4f || b.pos[3] <= 1e-4f) continue;
+                moved += std::fabs(a.pos[0] / a.pos[3] - b.pos[0] / b.pos[3]) + std::fabs(a.pos[1] / a.pos[3] - b.pos[1] / b.pos[3]);
+                n++;
+            }
+        }
+        bool jumped = n && moved / n > JUMP;
+        if (perspective) moved_3d++, jumped_3d += jumped;
+        interp_stats.jumped += jumped;
+        if (jumped) continue;
+        for (uint32_t v = d.first; v < d.first + d.count; v += 3) {
+            int32_t s = last_slot(v);
+            if (s < 0) continue;
+            for (int k = 0; k < 3; k++)
+                lerp_vertex(mid[at + (v - d.first) + k], last_frame.verts[size_t(s) + k], vertices[v + k], INTERP_T);
+        }
+    }
+    vertices.insert(vertices.end(), mid.begin(), mid.end());
+}
+
+// before a batch's in-between draws: twins of the surfaces they draw to start from their surfaces
+// (the first time this frame), and twins of surfaces just reloaded from guest memory take the new
+// image too
+void sync_twins(SDL_GPUCommandBuffer *cmd, const std::vector<Surface *> &reloaded) {
+    std::vector<Surface *> copy;
+    auto add = [&](Surface *s) {
+        if (s && std::find(copy.begin(), copy.end(), s) == copy.end()) copy.push_back(s);
+    };
+    for (Surface *s : reloaded)
+        if (twin_live(s)) add(s);
+    for (const DrawRec &d : batch)
+        if (d.interpolated) {
+            if (!twin_live(d.color)) add(d.color);
+            if (d.depth && !twin_live(d.depth)) add(d.depth);
+        }
+    if (copy.empty()) return;
+    SDL_GPUCopyPass *pass = SDL_BeginGPUCopyPass(cmd);
+    for (Surface *s : copy) {
+        if (!s->twin)
+            s->twin = s->depth ? make_texture(s->tw, s->th, depth_format, SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET)
+                               : make_texture(s->tw, s->th, SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM,
+                                              SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER);
+        SDL_GPUTextureLocation from{}, to{};
+        from.texture = s->tex, to.texture = s->twin;
+        SDL_CopyGPUTextureToTexture(pass, &from, &to, s->tw, s->th, 1, false);
+        s->twin_frame = frame_serial;
+    }
+    SDL_EndGPUCopyPass(pass);
+}
+
+void release_twins() {
+    for (auto &s : surfaces)
+        if (s->twin) SDL_ReleaseGPUTexture(dev, s->twin), s->twin = nullptr;
+}
+
+// The top screen's frames while interpolating, shown one per VBlank (see above). It keeps `depth`
+// frames ready after the game adds its own: three at 30 fps (the next VBlank's, the in-between one
+// and the game's), so a frame that comes a VBlank late still finds one; one at 60 fps
+struct TopQueue {
+    SDL_GPUTexture *tex[8] = {};
+    int w = 0, h = 0, next = 0, latest = -1;
+    std::deque<int> ready;
+    size_t depth = 1;
+    bool priming = true;    // ran dry: waits for `depth` frames before going on
+    uint64_t last_push = 0; // `vblanks` when a frame last came
+    uint32_t addr = 0;      // the LCD framebuffer the game put its last frame in
+
+    void reset() { ready.clear(), latest = -1, priming = true; }
+} top_queue; // under lcd_lock
+
+// a VBlank: the next frame in the queue, if it's going
+void advance_top_queue() {
+    TopQueue &q = top_queue;
+    if (q.ready.empty()) {
+        if (q.latest >= 0 && !q.priming) interp_stats.repeats++;
+        q.priming = true;
+        return;
+    }
+    if (q.priming && q.ready.size() < q.depth) return;
+    q.priming = false;
+    while (q.ready.size() > q.depth) q.ready.pop_front(), interp_stats.dropped++; // fell behind
+    q.latest = q.ready.front();
+    q.ready.pop_front();
+}
+
+// a top-screen frame is done: the next one is interpolated from it
+void end_interp_frame() {
+    uint64_t now = vblanks.load(), interval = now - last_frame_vblank;
+    last_frame_vblank = now;
+    interp_stats.intervals[std::min<uint64_t>(std::max<uint64_t>(interval, 1), 4) - 1]++;
+    std::swap(last_frame, this_frame);
+    this_frame.clear();
+    occurrences.clear();
+    moved_3d = jumped_3d = 0;
+    frame_serial++;
+    bool want = interp_wanted.load();
+    if (interp_on && !want) release_twins(), last_frame.clear();
+    interp_on = want;
+    // a game drawing every VBlank (movies, some menus) has no gap to fill
+    cadence = 0.75f * cadence + 0.25f * float(std::min<uint64_t>(std::max<uint64_t>(interval, 1), 4));
+    interp_this = interp_on && cadence > 1.5f;
+    static const bool stats = std::getenv("YW2_FPS") != nullptr;
+    if (stats && interp_on && ++interp_stats.frames == 150) {
+        const InterpStats &s = interp_stats;
+        LOG("interpolation: %d in-between frames for %d frames; draws %d, matched %d, jumped %d; VBlanks per frame "
+            "1:%d 2:%d 3:%d 4+:%d; skipped: not planned %d, no twin %d, cut %d; VBlanks repeated %d, frames dropped %d",
+            s.mids, s.frames, s.draws, s.matched, s.jumped, s.intervals[0], s.intervals[1], s.intervals[2],
+            s.intervals[3], s.not_planned, s.no_twin, s.cut, s.repeats, s.dropped);
+        interp_stats = {};
+    }
+}
 
 } // namespace
 
@@ -780,6 +1026,8 @@ bool init(SDL_GPUDevice *device) {
 bool active() { return ok; }
 int take_readback_count() { return readbacks.exchange(0); }
 
+bool fit_viewport(DrawRec &d);
+
 void begin_draw() {
     cur_skip = true;
     uint32_t dim = regs[FB_DIM];
@@ -800,6 +1048,7 @@ void begin_draw() {
     cur_ky = m ? float(h) / float(h + 2 * uint32_t(m)) : 1.0f;
     cur_cull = regs[CULL_MODE] & 3;
     cur_tex0 = regs[TEX0_ADDR];
+    cur_tris = 0;
 
     FragUniforms &u = d.fu;
     std::memset(&u, 0, sizeof u);
@@ -900,12 +1149,40 @@ void begin_draw() {
     int total_rows = int(h) + 2 * m;
     int top = total_rows - 1 - sy1; // raster rows run bottom to top; texture rows top to bottom
     d.scissor = {sx0 * s, top * s, std::max(0, sx1 - sx0 + 1) * s, std::max(0, sy1 - sy0 + 1) * s};
+    if (!fit_viewport(d)) return; // nothing of it is on the target
     d.first = uint32_t(vertices.size());
     cur_skip = false;
 }
 
+// SDL_GPU wants the viewport and scissor inside the render target; the PICA (like Vulkan itself)
+// takes a viewport reaching past it, e.g. a camera's view drawn partly off a small target. The
+// viewport is cut down to the target, and the triangles moved to make up for it (cur_refit). In
+// window pixels, x = left + (ndc_x + 1) w / 2 and y = top + (1 - ndc_y) h / 2 (y down, ndc y up).
+// False if the viewport misses the target entirely
+bool fit_viewport(DrawRec &d) {
+    cur_refit = false;
+    const float tw = float(d.color->tw), th = float(d.color->th);
+    SDL_GPUViewport &v = d.viewport;
+    float x0 = std::max(v.x, 0.0f), y0 = std::max(v.y, 0.0f);
+    float x1 = std::min(v.x + v.w, tw), y1 = std::min(v.y + v.h, th);
+    if (x1 <= x0 || y1 <= y0) return false;
+    if (x0 != v.x || y0 != v.y || x1 != v.x + v.w || y1 != v.y + v.h) {
+        float cw = x1 - x0, ch = y1 - y0;
+        refit_ax = v.w / cw, refit_bx = 2 * (v.x - x0) / cw + refit_ax - 1;
+        refit_ay = v.h / ch, refit_by = 1 - refit_ay - 2 * (v.y - y0) / ch;
+        v.x = x0, v.y = y0, v.w = cw, v.h = ch;
+        cur_refit = true;
+    }
+    SDL_Rect &r = d.scissor;
+    int rx1 = std::min(r.x + r.w, int(d.color->tw)), ry1 = std::min(r.y + r.h, int(d.color->th));
+    r.x = std::max(r.x, 0), r.y = std::max(r.y, 0);
+    r.w = std::max(0, rx1 - r.x), r.h = std::max(0, ry1 - r.y);
+    return true;
+}
+
 void triangle(const Vertex &v0, const Vertex &v1, const Vertex &v2) {
     if (cur_skip) return;
+    uint32_t tri = cur_tris++;
     const Vertex *v[3] = {&v0, &v1, &v2};
     float ky[3] = {1, 1, 1}, kx = 1, shift = 0;
     if (cur_ky != 1.0f) { // widescreen: see widescreen.cpp
@@ -917,9 +1194,10 @@ void triangle(const Vertex &v0, const Vertex &v1, const Vertex &v2) {
             lo = std::min(lo, x->a[POS + 1] / w), hi = std::max(hi, x->a[POS + 1] / w);
             xlo = std::min(xlo, x->a[POS] / w), xhi = std::max(xhi, x->a[POS] / w);
         }
-        // only full-screen layers (backgrounds, fades, tints) stretch; HUD bars keep their size
-        bool full_screen =
-            draw_fills_screen || (!perspective && lo <= -0.99f && hi >= 0.99f && xlo <= -0.99f && xhi >= 0.99f);
+        // only full-screen layers (backgrounds, fades, tints) and bars across the whole width (a
+        // banner, a menu's title bar: see side_of) stretch; other HUD keeps its size
+        bool full_screen = draw_fills_screen || (!perspective && draw_geom.valid && draw_geom.full_width) ||
+                           (!perspective && lo <= -0.99f && hi >= 0.99f && xlo <= -0.99f && xhi >= 0.99f);
         if (!full_screen) ky[0] = ky[1] = ky[2] = cur_ky;
         // the camera pulled back: the 3D scene drawn smaller about the middle
         if (!full_screen && perspective) {
@@ -943,25 +1221,29 @@ void triangle(const Vertex &v0, const Vertex &v1, const Vertex &v2) {
         const float *a = v[i]->a;
         GpuVertex g;
         g.pos[0] = a[POS] * kx, g.pos[1] = a[POS + 1] * ky[i] + shift * a[POS + 3], g.pos[2] = a[POS + 2], g.pos[3] = a[POS + 3];
+        if (cur_refit) g.pos[0] = refit_ax * g.pos[0] + refit_bx * g.pos[3], g.pos[1] = refit_ay * g.pos[1] + refit_by * g.pos[3];
         for (int c = 0; c < 4; c++) g.color[c] = a[COLOR + c], g.quat[c] = a[QUAT + c];
         g.tc01[0] = a[TEX0], g.tc01[1] = a[TEX0 + 1], g.tc01[2] = a[TEX1], g.tc01[3] = a[TEX1 + 1];
         g.tc2w[0] = a[TEX2], g.tc2w[1] = a[TEX2 + 1], g.tc2w[2] = a[TEX0_W], g.tc2w[3] = 0;
         g.view[0] = a[VIEW], g.view[1] = a[VIEW + 1], g.view[2] = a[VIEW + 2], g.view[3] = 0;
         vertices.push_back(g);
     }
+    tri_ids.push_back(tri);
 }
 
 // HUD size: shrinks the top screen's HUD, meaning 2D at the screen's edges (dialogue boxes, the
 // "Objective" bar, area names, icons) and anything drawn over it in the same frame (a portrait's
 // face over its body, a name tag over its box). 2D floating over the scene keeps its size and
 // place: it points at something in the 3D world (the bug net's and the Yo-kai Lens's aim).
-// HUD in the lower part shrinks toward the bottom center of the screen: one point for all of it
-// keeps its pieces together. HUD entirely in the upper half (an area name, status icons) shrinks
-// toward its own corner or the top center, so it stays where the game put it. 3D and large 2D
-// (backdrops) keep their size.
+// HUD against a side of the width shrinks toward that edge (see side_point). Other HUD in the lower
+// part shrinks toward the bottom center of the screen: one point for all of it keeps its pieces
+// together. Other HUD entirely in the upper half (an area name, status icons) shrinks toward its
+// own corner or the top center, so it stays where the game put it. 3D and large 2D (backdrops)
+// keep their size.
 struct HudBox {
     float xlo, xhi, ylo, yhi;
     float ax, ay; // the point it shrinks toward
+    bool full_width = false; // a bar across the whole width: only its height shrinks
 };
 std::vector<HudBox> hud_boxes; // this frame's HUD, unscaled; cleared when the frame goes to the LCD
 // elements (texture and vertex count) seen away from the edges and HUD: they float over the scene
@@ -992,10 +1274,49 @@ struct PlacedDraw {
     float ky;     // the target's widescreen factor (cur_ky) when drawn
     float k = 1;  // HUD scale applied to it since (a shift before scaling moves it k times as far)
     float ax = 0, ay = 0; // the point it shrank toward, when it did
+    bool on_bar = false;  // shrank as part of a bar across the whole width (in place along the width)
+    uint64_t key = 0;     // the element across frames: texture, vertex count and rough place (see held_sides)
 };
+
+// The side each element was placed at, across frames. What an element is grouped with changes from
+// frame to frame (a damage number or a speech bubble passing over it), and with it the side it goes
+// to: it jittered between the edge and its own place. A new side only sticks after HOLD_FRAMES of
+// it in a row
+struct HeldSide {
+    int side, pending, frames;
+    uint64_t frame; // use_clock when last counted
+};
+std::unordered_map<uint64_t, HeldSide> held_sides;
+constexpr int HOLD_FRAMES = 6;
+
+int hold_side(uint64_t key, int want) {
+    if (held_sides.size() > 4096) held_sides.clear();
+    auto it = held_sides.find(key);
+    if (it == held_sides.end()) {
+        held_sides[key] = {want, want, 0, use_clock};
+        return want;
+    }
+    HeldSide &h = it->second;
+    if (want == h.side) {
+        h.frames = 0;
+        return want;
+    }
+    if (want != h.pending) h.pending = want, h.frames = 0;
+    if (h.frame != use_clock) h.frames++, h.frame = use_clock;
+    if (h.frames < HOLD_FRAMES) return h.side;
+    h.side = want, h.frames = 0;
+    return want;
+}
 std::vector<PlacedDraw> placed;
 
-void shrink(uint32_t first, uint32_t count, float ax, float ay, float k);
+void shrink(uint32_t first, uint32_t count, float ax, float ay, float k, bool keep_width = false);
+
+// HUD at a side of the width shrinks toward a point on that edge: the corner when it touches the
+// top or bottom too, else the edge's middle. Everything along one side shrinks about the same point
+// and keeps its layout: the party panel's rows, the speech bubble and its portrait above them
+void side_point(float xlo, float xhi, int side, float *ax, float *ay) {
+    *ax = xhi >= 0.95f ? 1.0f : xlo <= -0.95f ? -1.0f : 0.0f, *ay = float(side);
+}
 
 void anchor_groups() {
     size_t n = placed.size();
@@ -1012,14 +1333,78 @@ void anchor_groups() {
     // bubble flying past the area name would be pulled to its side
     constexpr float EPS = 0.01f;
     auto area = [](const DrawGeom &g) { return std::max(g.xhi - g.xlo, 0.0f) * std::max(g.yhi - g.ylo, 0.0f); };
+    // particles spread over the scene and bars across the whole width (see side_of) join nothing:
+    // their box overlaps all the HUD and would make one group of it, with one side and one point to
+    // shrink toward for both the party panel on the left and the buttons on the right
     for (size_t i = 0; i < n; i++)
         for (size_t j = i + 1; j < n; j++) {
             const DrawGeom &a = placed[i].g, &b = placed[j].g;
+            if (a.alone || b.alone) continue;
             if (!(a.xlo <= b.xhi + EPS && b.xlo <= a.xhi + EPS && a.ylo <= b.yhi + EPS && b.ylo <= a.yhi + EPS)) continue;
             float common = std::max(std::min(a.xhi, b.xhi) - std::max(a.xlo, b.xlo), 0.0f) *
                            std::max(std::min(a.yhi, b.yhi) - std::max(a.ylo, b.ylo), 0.0f);
             if (common >= 0.1f * std::min(area(a), area(b)) || (a.own && a.own == b.own)) parent[root(i)] = root(j);
         }
+    // each group's box (before any shift or scaling), which sides of the width its pieces reach,
+    // and whether one of them pins it to the middle
+    struct Box {
+        float xlo = 1e9f, xhi = -1e9f, ylo = 1e9f, yhi = -1e9f;
+        bool left = false, right = false, pins = false;
+        int side() const { return pins || left == right ? 0 : left ? -1 : 1; }
+    };
+    std::vector<Box> box(n);
+    auto measure = [&] {
+        std::fill(box.begin(), box.end(), Box{});
+        for (size_t i = 0; i < n; i++) {
+            const DrawGeom &g = placed[i].g;
+            Box &b = box[root(i)];
+            b.xlo = std::min(b.xlo, g.xlo), b.xhi = std::max(b.xhi, g.xhi), b.ylo = std::min(b.ylo, g.ylo), b.yhi = std::max(b.yhi, g.yhi);
+            b.left |= g.ylo <= -0.95f, b.right |= g.yhi >= 0.95f, b.pins |= g.pins;
+        }
+    };
+    // the rows of a side panel (Blasters' party: one row per Yo-kai) only touch, and only some of
+    // their pieces reach the edge: groups that touch and reach the same side are one panel, also
+    // when one of them crosses the middle (a speech bubble whose portrait covers the top row)
+    for (bool merged = true; merged;) {
+        merged = false;
+        measure();
+        for (size_t i = 0; i < n && !merged; i++)
+            for (size_t j = i + 1; j < n && !merged; j++) {
+                if (root(i) != i || root(j) != j || placed[i].g.alone || placed[j].g.alone) continue;
+                const Box &a = box[i], &b = box[j];
+                if (a.pins || b.pins || !((a.left && b.left) || (a.right && b.right))) continue;
+                if (!(a.xlo <= b.xhi + EPS && b.xlo <= a.xhi + EPS && a.ylo <= b.yhi + EPS && b.ylo <= a.yhi + EPS)) continue;
+                parent[j] = i, merged = true;
+            }
+    }
+    measure();
+    // the side of the width a piece goes with: its group's, for the pieces in that half. A group can
+    // reach both (a chain of overlaps from the party panel through a speech bubble and the enemy's
+    // HP bar to an icon at the top right): each half keeps to its own side, the middle stays put
+    auto half_side = [&](size_t i) {
+        const Box &b = box[root(i)];
+        const DrawGeom &g = placed[i].g;
+        return b.pins ? 0 : b.left && g.yhi <= 0.0f ? -1 : b.right && g.ylo >= 0.0f ? 1 : 0;
+    };
+    // pieces that shrank on a bar across the whole width but belong with HUD on a side go with that
+    // side (Squeeky's name and HP over the banner along the bottom, while the rest of the party panel
+    // shrank toward its edge); a menu's rows, all on their bars, stay in place
+    std::vector<bool> off_bar(n, false);
+    for (size_t i = 0; i < n; i++)
+        if (placed[i].k < 1.0f && !placed[i].on_bar && !placed[i].g.alone) off_bar[root(i)] = true;
+    for (size_t i = 0; i < n; i++) {
+        PlacedDraw &d = placed[i];
+        int side = half_side(i);
+        if (!d.on_bar || d.k == 1.0f || !off_bar[root(i)] || !side) continue;
+        float ax, ay;
+        side_point(d.g.xlo, d.g.xhi, side, &ax, &ay);
+        for (uint32_t v = d.first; v < d.first + d.count; v++) { // undo, then toward the side's point
+            float *p = vertices[v].pos;
+            p[0] = ax + (d.ax + (p[0] - d.ax) / d.k - ax) * d.k;
+            p[1] = ay + (d.ay + (p[1] - d.ay) / d.k - ay) * d.k;
+        }
+        d.ax = ax, d.ay = ay, d.on_bar = false;
+    }
     // a group is HUD as a whole: when its largest piece shrank as HUD, the pieces that didn't shrink
     // with it the same way (a portrait reaching past the screen's edge, behind its dialogue box,
     // otherwise stays full size above the shrunken box)
@@ -1028,11 +1413,32 @@ void anchor_groups() {
         size_t r = root(i);
         if (placed[i].k < 1.0f && (scaled[r] == SIZE_MAX || area(placed[i].g) > area(placed[scaled[r]].g))) scaled[r] = i;
     }
+    // HUD on a side is HUD every frame: in a frame where none of its pieces shrank on its own (the
+    // ones reaching the edge counted as floating), it would pop back to full size
+    std::vector<int> pieces(n, 0);
+    for (size_t i = 0; i < n; i++) pieces[root(i)]++;
+    float hud_k = hud_scale();
+    bool hud_on = hud_k < 1.0f && top_has_3d();
+    for (size_t i = 0; i < n; i++) {
+        if (placed[i].k != 1.0f || scaled[root(i)] != SIZE_MAX || !hud_on || pieces[root(i)] < 2) continue;
+        int side = half_side(i);
+        if (!side) continue;
+        float ax, ay;
+        side_point(placed[i].g.xlo, placed[i].g.xhi, side, &ax, &ay);
+        shrink(placed[i].first, placed[i].count, ax, ay, hud_k);
+    }
     for (size_t i = 0; i < n; i++) {
         size_t s = scaled[root(i)];
         if (s == SIZE_MAX || placed[i].k != 1.0f) continue;
         const PlacedDraw &hud = placed[s];
-        shrink(placed[i].first, placed[i].count, hud.ax, hud.ay, hud.k);
+        // in a group on one side, the pieces in that half of the width go where pieces of their own
+        // touching the edge would (the lower rows of the party panel, whose pieces short of the edge
+        // didn't shrink, while the top row did); the rest goes with the largest piece
+        float ax = hud.ax, ay = hud.ay;
+        int side = half_side(i);
+        const DrawGeom &g = placed[i].g;
+        if (side) side_point(g.xlo, g.xhi, side, &ax, &ay);
+        shrink(placed[i].first, placed[i].count, ax, ay, hud.k);
     }
     std::vector<int> side(n, 2); // per root: 2 undecided, 3 conflicting, else -1/0/1
     std::vector<bool> pinned(n, false);
@@ -1044,7 +1450,14 @@ void anchor_groups() {
     }
     for (size_t i = 0; i < n; i++) {
         size_t r = root(i);
-        int want = pinned[r] || side[r] == 3 ? 0 : side[r] == 2 ? placed[i].g.applied : side[r];
+        // no piece touches an edge on its own (Blasters' buttons while the soul gauge pulses just
+        // short of it): the group's box still may
+        int undecided = box[r].side() ? box[r].side() : placed[i].g.applied;
+        int want = pinned[r] ? 0 : side[r] == 3 ? half_side(i) : side[r] == 2 ? undecided : side[r];
+        // reaching neither side and across the middle: it's centered (the enemy's HP bar at the top,
+        // whose portrait at its left end touches the top edge in the left half)
+        if (!box[r].left && !box[r].right && box[r].ylo < 0.0f && box[r].yhi > 0.0f) want = 0;
+        want = hold_side(placed[i].key, want);
         PlacedDraw &d = placed[i];
         char note[200];
         std::snprintf(note, sizeof note, "  group %zu: x=[%.2f,%.2f] y=[%.2f,%.2f] own=%d pins=%d side %d -> %d k=%.2f\n", r, d.g.xlo,
@@ -1057,13 +1470,13 @@ void anchor_groups() {
     }
 }
 
-void shrink(uint32_t first, uint32_t count, float ax, float ay, float k) {
+void shrink(uint32_t first, uint32_t count, float ax, float ay, float k, bool keep_width) {
     for (PlacedDraw &d : placed)
         if (d.first == first) d.k *= k, d.ax = ax, d.ay = ay;
     for (uint32_t i = first; i < first + count; i++) {
         float *p = vertices[i].pos;
         p[0] = ax + (p[0] - ax) * k;
-        p[1] = ay + (p[1] - ay) * k;
+        if (!keep_width) p[1] = ay + (p[1] - ay) * k;
     }
 }
 
@@ -1111,10 +1524,24 @@ void scale_hud(uint32_t first, uint32_t count, float k) {
     }
     floating.erase(key);
     // the top screen is rotated: clip x runs along its height (-1 at the bottom), y along its width.
-    // Drawn over HUD: toward the same point, so it stays with it (a name tag over its box)
+    // Drawn over HUD: toward the same point, so it stays with it (a name tag over its box). A bar
+    // across the whole width stretches to the new edges and only gets thinner, toward the top or
+    // bottom; what's on it stays where it is along the width, shrinking about its own middle (an
+    // icon and the move name next to it), or about the edge it touches (an icon at the bar's end)
+    auto in_place = [](float lo, float hi) { return lo <= -0.99f ? -1.0f : hi >= 0.99f ? 1.0f : (lo + hi) / 2; };
+    bool full_width = draw_geom.valid && draw_geom.full_width;
     float ax = -1.0f, ay = 0.0f; // the bottom center
-    if (under != hud_boxes.end()) {
-        ax = under->ax, ay = under->ay;
+    int side = !draw_geom.valid             ? 0
+               : draw_geom.ylo <= -0.95f && draw_geom.yhi < 0.0f ? -1
+               : draw_geom.yhi >= 0.95f && draw_geom.ylo > 0.0f  ? 1
+                                                                 : 0;
+    if (full_width) {
+        float center = (xlo + xhi) / 2;
+        ax = center < -1.0f / 3 ? -1.0f : center > 1.0f / 3 ? 1.0f : 0.0f;
+    } else if (under != hud_boxes.end()) {
+        ax = under->ax, ay = under->full_width ? in_place(ylo, yhi) : under->ay;
+    } else if (side) {
+        side_point(draw_geom.xlo, draw_geom.xhi, side, &ax, &ay);
     } else if (xlo > 0.0f) {
         float center = (ylo + yhi) / 2;
         ax = 1.0f, ay = center < -1.0f / 3 ? -1.0f : center > 1.0f / 3 ? 1.0f : 0.0f;
@@ -1123,11 +1550,17 @@ void scale_hud(uint32_t first, uint32_t count, float k) {
     std::snprintf(note, sizeof note, "  hud x=[%.2f,%.2f] y=[%.2f,%.2f] toward (%.2f,%.2f)%s k=%.2f\n", xlo, xhi, ylo, yhi, ax, ay,
                   under != hud_boxes.end() ? " (over hud)" : "", k);
     pica::draw_log_note(note);
-    hud_boxes.push_back({xlo, xhi, ylo, yhi, ax, ay});
-    shrink(first, count, ax, ay, k);
+    bool on_bar = under != hud_boxes.end() && under->full_width; // before the push moves the boxes
+    hud_boxes.push_back({xlo, xhi, ylo, yhi, ax, ay, full_width});
+    shrink(first, count, ax, ay, k, full_width);
+    auto mark_on_bar = [](uint32_t f) {
+        for (PlacedDraw &d : placed)
+            if (d.first == f) d.on_bar = true;
+    };
+    if (on_bar) mark_on_bar(first);
     // earlier pieces it covers belong to it, and so do the pieces they cover in turn (a portrait's
     // face over its body, the body over the dialogue box's backdrop)
-    std::vector<HudBox> claimed{{xlo, xhi, ylo, yhi, ax, ay}};
+    std::vector<HudBox> claimed{{xlo, xhi, ylo, yhi, ax, ay, full_width}};
     while (!claimed.empty()) {
         HudBox b = claimed.back();
         claimed.pop_back();
@@ -1140,10 +1573,12 @@ void scale_hud(uint32_t first, uint32_t count, float k) {
             Candidate piece = candidates[i];
             candidates.erase(candidates.begin() + long(i));
             floating.erase(piece.key);
-            HudBox box{piece.box.xlo, piece.box.xhi, piece.box.ylo, piece.box.yhi, ax, ay};
+            float py = b.full_width ? in_place(piece.box.ylo, piece.box.yhi) : b.ay;
+            HudBox box{piece.box.xlo, piece.box.xhi, piece.box.ylo, piece.box.yhi, b.ax, py};
             hud_boxes.push_back(box);
             claimed.push_back(box);
-            shrink(piece.first, piece.count, ax, ay, k);
+            shrink(piece.first, piece.count, b.ax, py, k);
+            if (b.full_width) mark_on_bar(piece.first);
         }
     }
 }
@@ -1151,23 +1586,34 @@ void scale_hud(uint32_t first, uint32_t count, float k) {
 void end_draw() {
     if (cur_skip) return;
     cur.count = uint32_t(vertices.size()) - cur.first;
-    if (cur.count && cur.color->height == 400 && cur_ky != 1.0f && draw_geom.valid)
-        placed.push_back({cur.first, cur.count, draw_geom, cur_ky});
+    if (cur.count && cur.color->height == 400 && cur_ky != 1.0f && draw_geom.valid) {
+        // rough place: an element that moves a little (a bar filling) is still the same one
+        uint64_t qx = uint64_t(int((draw_geom.xlo + 2.0f) * 10.0f)), qy = uint64_t(int((draw_geom.ylo + 2.0f) * 10.0f));
+        uint64_t key = (uint64_t(cur_tex0) * 0x9E3779B97F4A7C15ull) ^ (uint64_t(cur.count) * 0xC2B2AE3D27D4EB4Full) ^ (qx << 16 | qy);
+        placed.push_back({cur.first, cur.count, draw_geom, cur_ky, 1, 0, 0, false, key});
+    }
     float hud = hud_scale();
     if (cur.count && hud < 1.0f && cur.color->height == 400 && top_has_3d()) scale_hud(cur.first, cur.count, hud);
-    if (cur.count) batch.push_back(cur);
+    if (cur.count) {
+        cur.tris = cur_tris, cur.match = match_key(cur);
+        batch.push_back(cur);
+    }
 }
 
 void flush() {
     if (batch.empty() && texture_uploads.empty() && surface_loads.empty() && depth_clears.empty() && !lut_upload)
         return;
     anchor_groups(); // before the vertices go to the GPU
+    if (interp_on) interpolate_batch();
+    std::vector<Surface *> reloaded;
+    for (auto &l : surface_loads) reloaded.push_back(l.surface);
     SDL_GPUCommandBuffer *cmd = SDL_AcquireGPUCommandBuffer(dev);
     SDL_GPUBuffer *vbuf = nullptr;
     clear_fresh(cmd);
     upload_pending(cmd, &vbuf);
     clear_new_depth(cmd);
     if (!vbuf) batch.clear(); // out of GPU memory: this batch is lost
+    if (interp_this) sync_twins(cmd, reloaded);
     SDL_GPURenderPass *pass = nullptr;
     Surface *bc = nullptr, *bd = nullptr;
     for (const DrawRec &d : batch) {
@@ -1187,11 +1633,51 @@ void flush() {
         SDL_PushGPUFragmentUniformData(cmd, 0, &d.fu, sizeof d.fu);
         SDL_DrawGPUPrimitives(pass, d.count, 1, d.first, 0);
     }
-    if (pass) SDL_EndGPURenderPass(pass);
+    if (pass) SDL_EndGPURenderPass(pass), pass = nullptr;
+    // the in-between frame: the same draws into the twins, sampling what this frame drew in between
+    if (interp_this) {
+        std::unordered_map<SDL_GPUTexture *, SDL_GPUTexture *> twin;
+        for (auto &s : surfaces)
+            if (twin_live(s.get())) twin[s->tex] = s->twin;
+        SDL_GPUTexture *bound_color = nullptr, *bound_depth = nullptr;
+        for (const DrawRec &d : batch) {
+            if (!d.interpolated) continue;
+            SDL_GPUTexture *color = d.color->twin, *depth = d.depth ? d.depth->twin : nullptr;
+            if (!pass || bound_color != color || bound_depth != depth) {
+                if (pass) SDL_EndGPURenderPass(pass);
+                SDL_GPUColorTargetInfo ct{};
+                ct.texture = color;
+                ct.load_op = SDL_GPU_LOADOP_LOAD, ct.store_op = SDL_GPU_STOREOP_STORE;
+                SDL_GPUDepthStencilTargetInfo dt{};
+                dt.texture = depth;
+                dt.load_op = dt.stencil_load_op = SDL_GPU_LOADOP_LOAD;
+                dt.store_op = dt.stencil_store_op = SDL_GPU_STOREOP_STORE;
+                pass = SDL_BeginGPURenderPass(cmd, &ct, 1, depth ? &dt : nullptr);
+                bound_color = color, bound_depth = depth;
+            }
+            SDL_BindGPUGraphicsPipeline(pass, d.pipeline);
+            SDL_SetGPUViewport(pass, &d.viewport);
+            SDL_SetGPUScissor(pass, &d.scissor);
+            SDL_SetGPUStencilReference(pass, d.stencil_ref);
+            SDL_SetGPUBlendConstants(pass, d.blend_const);
+            SDL_GPUBufferBinding vb{vbuf, 0};
+            SDL_BindGPUVertexBuffers(pass, 0, &vb, 1);
+            SDL_GPUTextureSamplerBinding tex[4] = {{d.tex[0], d.samp[0]}, {d.tex[1], d.samp[1]}, {d.tex[2], d.samp[2]},
+                                                   {lut_tex, nearest_clamp}};
+            for (int i = 0; i < 3; i++)
+                if (auto it = twin.find(tex[i].texture); it != twin.end()) tex[i].texture = it->second;
+            SDL_BindGPUFragmentSamplers(pass, 0, tex, 4);
+            SDL_PushGPUVertexUniformData(cmd, 0, d.depth_map, sizeof d.depth_map);
+            SDL_PushGPUFragmentUniformData(cmd, 0, &d.fu, sizeof d.fu);
+            SDL_DrawGPUPrimitives(pass, d.count, 1, d.ifirst, 0);
+        }
+        if (pass) SDL_EndGPURenderPass(pass);
+    }
     SDL_SubmitGPUCommandBuffer(cmd);
     if (vbuf) SDL_ReleaseGPUBuffer(dev, vbuf);
     batch.clear();
     vertices.clear();
+    tri_ids.clear();
     placed.clear();
     settle_candidates(); // their vertices are gone
     static uint64_t trimmed = 0;
@@ -1220,6 +1706,7 @@ bool memory_fill(uint32_t start, uint32_t end, uint32_t value, uint32_t control)
             dt.load_op = dt.stencil_load_op = SDL_GPU_LOADOP_CLEAR;
             dt.store_op = dt.stencil_store_op = SDL_GPU_STOREOP_STORE;
             SDL_EndGPURenderPass(SDL_BeginGPURenderPass(cmd, nullptr, 0, &dt));
+            if (twin_live(s.get())) dt.texture = s->twin, SDL_EndGPURenderPass(SDL_BeginGPURenderPass(cmd, nullptr, 0, &dt));
         } else {
             uint8_t bytes[4];
             std::memcpy(bytes, &value, 4);
@@ -1231,6 +1718,7 @@ bool memory_fill(uint32_t start, uint32_t end, uint32_t value, uint32_t control)
             ct.clear_color = {c.r / 255.0f, c.g / 255.0f, c.b / 255.0f, c.a / 255.0f};
             ct.load_op = SDL_GPU_LOADOP_CLEAR, ct.store_op = SDL_GPU_STOREOP_STORE;
             SDL_EndGPURenderPass(SDL_BeginGPURenderPass(cmd, &ct, 1, nullptr));
+            if (twin_live(s.get())) ct.texture = s->twin, SDL_EndGPURenderPass(SDL_BeginGPURenderPass(cmd, &ct, 1, nullptr));
         }
     }
     if (cmd) SDL_SubmitGPUCommandBuffer(cmd);
@@ -1246,10 +1734,12 @@ bool display_transfer(uint32_t in, uint32_t out, uint32_t in_w, uint32_t in_h, u
         placed.clear();
         hud_boxes.clear(), settle_candidates(), use_clock++;
     }
+    bool top = in_h == 400;
     // YW2_TEST_READBACK: every frame goes GPU -> guest memory -> CPU transfer (tests readback)
     static const bool test_readback = std::getenv("YW2_TEST_READBACK") != nullptr;
     if (test_readback) {
         before_cpu_read(in, in_w * in_h * 4);
+        if (top) end_interp_frame();
         return false;
     }
     uint32_t p = to_physical(in);
@@ -1258,7 +1748,10 @@ bool display_transfer(uint32_t in, uint32_t out, uint32_t in_w, uint32_t in_h, u
         if (!s->depth && s->addr == p && s->width == in_w && s->height == in_h) src = s.get();
     // the LCDs take linear RGB output; other transfers (into textures) go through guest memory
     bool to_lcd = !(flags & 2) && !(flags & 0x20) && (((flags >> 12) & 7) <= 1);
-    if (!src || !to_lcd) return false;
+    if (!src || !to_lcd) {
+        if (top) end_interp_frame();
+        return false;
+    }
     flush();
     uint32_t hs = ((flags >> 24) & 3) ? 1 : 0, vs = ((flags >> 24) & 3) == 2 ? 1 : 0;
     int w = int(src->th >> vs), h = int(src->tw >> hs); // upright: rows of the output become columns
@@ -1276,26 +1769,64 @@ bool display_transfer(uint32_t in, uint32_t out, uint32_t in_w, uint32_t in_h, u
     }
     int slot = f.next;
     f.next = (f.next + 1) % 3;
-    SDL_GPUTexture *target = f.tex[slot];
+    // while interpolating, the top screen's frames also go to its queue: an in-between frame, unless
+    // the camera cut (most of the 3D jumped)
+    bool queue = top && interp_on;
+    bool mid = queue && interp_this && twin_live(src) && !(jumped_3d * 2 > moved_3d);
+    TopQueue &q = top_queue;
+    int qslot = -1, qmid = -1;
+    if (queue) {
+        if (q.w != w || q.h != h) {
+            for (auto *t : q.tex)
+                if (t) SDL_ReleaseGPUTexture(dev, t);
+            for (auto *&t : q.tex)
+                t = make_texture(uint32_t(w), uint32_t(h), SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM,
+                                 SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER);
+            q.w = w, q.h = h, q.reset();
+        }
+        if (mid) qmid = q.next, q.next = (q.next + 1) % 8;
+        qslot = q.next, q.next = (q.next + 1) % 8;
+    }
     SDL_UnlockMutex(lcd_lock);
 
     SDL_GPUCommandBuffer *cmd = SDL_AcquireGPUCommandBuffer(dev);
-    SDL_GPUColorTargetInfo ct{};
-    ct.texture = target;
-    ct.load_op = SDL_GPU_LOADOP_DONT_CARE, ct.store_op = SDL_GPU_STOREOP_STORE;
-    SDL_GPURenderPass *pass = SDL_BeginGPURenderPass(cmd, &ct, 1, nullptr);
-    SDL_BindGPUGraphicsPipeline(pass, blit_pipeline);
-    SDL_GPUTextureSamplerBinding b{src->tex, linear_clamp};
-    SDL_BindGPUFragmentSamplers(pass, 0, &b, 1);
-    BlitUniforms u{{float(w), float(h), float(src->tw), float(src->th)}, {int32_t(flags & 1), int32_t(hs), int32_t(vs), 0}};
-    SDL_PushGPUFragmentUniformData(cmd, 0, &u, sizeof u);
-    SDL_DrawGPUPrimitives(pass, 3, 1, 0, 0);
-    SDL_EndGPURenderPass(pass);
+    auto blit = [&](SDL_GPUTexture *from, SDL_GPUTexture *target) {
+        SDL_GPUColorTargetInfo ct{};
+        ct.texture = target;
+        ct.load_op = SDL_GPU_LOADOP_DONT_CARE, ct.store_op = SDL_GPU_STOREOP_STORE;
+        SDL_GPURenderPass *pass = SDL_BeginGPURenderPass(cmd, &ct, 1, nullptr);
+        SDL_BindGPUGraphicsPipeline(pass, blit_pipeline);
+        SDL_GPUTextureSamplerBinding b{from, linear_clamp};
+        SDL_BindGPUFragmentSamplers(pass, 0, &b, 1);
+        BlitUniforms u{{float(w), float(h), float(src->tw), float(src->th)}, {int32_t(flags & 1), int32_t(hs), int32_t(vs), 0}};
+        SDL_PushGPUFragmentUniformData(cmd, 0, &u, sizeof u);
+        SDL_DrawGPUPrimitives(pass, 3, 1, 0, 0);
+        SDL_EndGPURenderPass(pass);
+    };
+    blit(src->tex, f.tex[slot]);
+    if (mid) blit(src->twin, q.tex[qmid]);
+    if (queue) blit(src->tex, q.tex[qslot]);
     SDL_SubmitGPUCommandBuffer(cmd);
 
     SDL_LockMutex(lcd_lock);
     f.latest = slot;
+    if (queue) {
+        if (mid) interp_stats.mids++;
+        else if (!interp_this) interp_stats.not_planned++;
+        else if (!twin_live(src)) interp_stats.no_twin++;
+        else interp_stats.cut++;
+        if (!interp_this) { // a frame every VBlank: shown at the next one
+            q.ready.clear(), q.depth = 1;
+        } else {
+            q.depth = 3;
+        }
+        if (mid) q.ready.push_back(qmid);
+        else if (interp_this) q.ready.push_back(qslot); // no in-between frame: the game's, twice
+        q.ready.push_back(qslot);
+        q.last_push = vblanks.load(), q.addr = out;
+    }
     SDL_UnlockMutex(lcd_lock);
+    if (top) end_interp_frame();
     return true;
 }
 
@@ -1327,7 +1858,28 @@ void invalidate(uint32_t addr, uint32_t size) {
         if (p < s->addr + s->bytes() && s->addr < p + size) s->reload = true, s->drawn = false; // guest is newer
     SDL_LockMutex(lcd_lock);
     lcd.erase(addr); // an LCD buffer written by the CPU shows that, not an older GPU frame
+    if (addr == top_queue.addr) top_queue.reset();
     SDL_UnlockMutex(lcd_lock);
+}
+
+void vblank() {
+    vblanks++;
+    if (!ok) return;
+    SDL_LockMutex(lcd_lock);
+    advance_top_queue();
+    SDL_UnlockMutex(lcd_lock);
+}
+
+SDL_GPUTexture *top_frame(int *width, int *height) {
+    if (!ok) return nullptr;
+    SDL_LockMutex(lcd_lock);
+    SDL_GPUTexture *t = nullptr;
+    const TopQueue &q = top_queue;
+    // only while the game's frames keep coming (not when it shows something drawn by the CPU)
+    if (interp_wanted && q.latest >= 0 && vblanks.load() - q.last_push < 8)
+        t = q.tex[q.latest], *width = q.w, *height = q.h;
+    SDL_UnlockMutex(lcd_lock);
+    return t;
 }
 
 SDL_GPUTexture *lcd_frame(uint32_t addr, int *width, int *height) {
@@ -1344,3 +1896,7 @@ SDL_GPUTexture *lcd_frame(uint32_t addr, int *width, int *height) {
 }
 
 } // namespace pica::gpu
+
+namespace pica {
+void set_frame_interpolation(bool on) { gpu::interp_wanted = on; }
+} // namespace pica
