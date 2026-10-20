@@ -105,6 +105,8 @@ Ncch read_ncch(std::ifstream &file, const std::filesystem::path &path) {
     read_at(ncch, h, sizeof h);
     if (std::memcmp(h + 0x100, "NCCH", 4) != 0) fatal("%s has no NCCH partition", path.string().c_str());
     if (!(h[0x18F] & 0x4)) fatal("%s is encrypted; decrypt it with GodMode9 first", path.string().c_str());
+    if (!(h[0x18D] & 0x2))
+        fatal("%s isn't the game's program (an e-manual or other content?); use its .0 content", path.string().c_str());
     Ncch n;
     std::memcpy(&n.program_id, h + 0x118, 8);
 
@@ -156,6 +158,8 @@ std::optional<uint64_t> peek_program_id(const std::filesystem::path &path) {
     f.clear();
     if (!f.seekg(std::streamoff(*ncch)) || !f.read(reinterpret_cast<char *>(h), sizeof h)) return std::nullopt;
     if (std::memcmp(h + 0x100, "NCCH", 4) != 0 || !(h[0x18F] & 0x4)) return std::nullopt;
+    // not executable: a title's other contents (its e-manual, a download play child) share its program id
+    if (!(h[0x18D] & 0x2)) return std::nullopt;
     uint64_t id;
     std::memcpy(&id, h + 0x118, 8);
     return id;

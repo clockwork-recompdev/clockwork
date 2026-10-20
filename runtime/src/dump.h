@@ -79,7 +79,7 @@ private:
 };
 
 // the program id of a dump, read from its header without loading it; nullopt if it isn't a
-// readable, decrypted .3ds/.cci, .cxi or .cia. An update's is its own (0004000E...: see update_of)
+// readable, decrypted, executable .3ds/.cci, .cxi/.ncch or .cia. An update's is its own (0004000E...: see update_of)
 std::optional<uint64_t> peek_program_id(const std::filesystem::path &path);
 
 // updates: the game an update's program id updates (0004000E... -> 00040000...); nullopt if it isn't one

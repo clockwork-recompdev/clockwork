@@ -47,7 +47,10 @@ std::string update_for(uint64_t program_id) {
     const Settings &s = settings();
     auto it = s.updates.find(program_id);
     std::error_code ec;
-    return it != s.updates.end() && std::filesystem::is_regular_file(it->second, ec) ? it->second : "";
+    if (it == s.updates.end() || !std::filesystem::is_regular_file(it->second, ec)) return "";
+    // remembered before it was checked (an e-manual's content shares the update's program id)
+    auto id = peek_program_id(it->second);
+    return id && update_of(*id) == program_id ? it->second : "";
 }
 
 std::string code_binary(const KnownDump &dump, bool updated) { return std::string(dump.binary) + (updated ? "_upd" : ""); }
@@ -98,13 +101,18 @@ void play_in(const char *name, const std::string &dump_path) {
     std::string exe = binary_path(name).string();
     LOG("handing %s to %s", dump_path.c_str(), exe.c_str());
     std::fflush(nullptr);
+    // --update goes along, or the other program falls back to the update in the settings
+    auto id = peek_program_id(dump_path);
+    std::string update = id && update_override.first == *id ? update_override.second : "";
 #ifdef _WIN32
     // quoted, as the C runtime joins the arguments into one command line
-    std::string q_exe = "\"" + exe + "\"", q_dump = "\"" + dump_path + "\"";
-    const char *argv[] = {q_exe.c_str(), "--play", q_dump.c_str(), nullptr};
+    std::string q_exe = "\"" + exe + "\"", q_dump = "\"" + dump_path + "\"", q_update = "\"" + update + "\"";
+    const char *argv[] = {q_exe.c_str(), "--play", q_dump.c_str(), nullptr, nullptr, nullptr};
+    if (!update.empty()) argv[3] = "--update", argv[4] = q_update.c_str();
     _execv(exe.c_str(), argv);
 #else
-    const char *argv[] = {exe.c_str(), "--play", dump_path.c_str(), nullptr};
+    const char *argv[] = {exe.c_str(), "--play", dump_path.c_str(), nullptr, nullptr, nullptr};
+    if (!update.empty()) argv[3] = "--update", argv[4] = update.c_str();
     execv(exe.c_str(), const_cast<char *const *>(argv));
 #endif
     LOG("could not start %s", exe.c_str());

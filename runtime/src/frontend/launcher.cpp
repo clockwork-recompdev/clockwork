@@ -88,7 +88,8 @@ void find_dumps(Settings &s, const std::filesystem::path &folder) {
 // forgets dumps that are gone, and finds new ones next to the ones known
 void refresh_dumps(Settings &s) {
     for (auto it = s.dumps.begin(); it != s.dumps.end();) it = dump_exists(it->second) ? std::next(it) : s.dumps.erase(it);
-    for (auto it = s.updates.begin(); it != s.updates.end();) it = dump_exists(it->second) ? std::next(it) : s.updates.erase(it);
+    for (auto it = s.updates.begin(); it != s.updates.end();)
+        it = dump_exists(it->second) && peek_program_id(it->second) ? std::next(it) : s.updates.erase(it);
     std::set<std::filesystem::path> folders;
     if (!s.dump_folder.empty()) folders.insert(s.dump_folder);
     if (dump_exists(s.game_path)) folders.insert(std::filesystem::path(s.game_path).parent_path());
