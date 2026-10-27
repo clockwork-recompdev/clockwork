@@ -1,3 +1,11 @@
+# Discontinuation of project
+This may come as a surprise to many of you, as this had just come out. However, I have come to the realization that this shit is fucking boring.
+It's not fulfilling whatsoever to let AI do this for you. It's unfulfilling, lazy, and overall boring.
+I will no longer be updating this project. Fork it, play with it, do whatever, but I personally will no longer be providing support for this.
+
+Pick up a keyboard, and learn to code.
+
+
 # Clockwork
 
 Native PC versions of the **Yo-kai Watch games on the Nintendo 3DS**, made by static
@@ -48,6 +56,15 @@ Psychic Specters is the most played and tested; the others are newer here.
 - **Mods**: install from GameBanana in the launcher, or drop them in yourself. They're applied as
   the game starts and never change the dump: whole RomFS files (LayeredFS-style translations) and
   files inside Level-5's archives.
+- **HD textures** (GPU renderer): press F10 while playing to save each new texture the game uses to
+  `dump/textures/<game>/` in the data folder, as `<hash>_<width>x<height>_f<format>.png`. Redraw any
+  of them at a larger size (2x, 4x, any size works), keeping the file name, and put them in a mod's
+  `textures/` folder (`mods/yw2/<pack>/textures/`); they replace the originals the next time the
+  game starts. Only the hash at the start of the name has to match.
+- **AI-upscaled textures** (GPU renderer, Graphics settings): each texture is upscaled once in the
+  background by [Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN) (its anime model, 2x or 4x),
+  cached in `upscaled/<game>/` and drawn from then on; the launcher downloads Real-ESRGAN
+  (`tools/realesrgan/`) when you turn it on. HD texture packs win over it.
 - **Saves**: each game keeps its own. Import a save from a 3DS (a Checkpoint or JKSM backup) on the
   Library tab; the current one is kept in `save-backups`.
 - **Local wireless over the internet (Rooms)**: battles, trades and co-op between two windows on
@@ -122,7 +139,7 @@ back if you turned it off.
 
 Everything is rebindable on the Settings tab. In game: F5 changes the one-screen layout for the
 current kind of scene, F6 adaptive layout, F7 widescreen, F8 picture-in-picture, F9 one or two
-screens, Tab (or the right stick) swaps screens, F11 fullscreen. F12 saves a capture (screenshot
+screens, F10 saves textures for HD packs, Tab (or the right stick) swaps screens, F11 fullscreen. F12 saves a capture (screenshot
 plus scene info) and Shift+F12 a 90-frame burst with draw logs, for bug reports.
 
 Saves, settings, mods, title images and captures live in your user data folder:
