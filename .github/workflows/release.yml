@@ -57,7 +57,7 @@ jobs:
       - name: Libraries (Windows)
         if: runner.os == 'Windows'
         run: |
-          "$VCPKG_INSTALLATION_ROOT/vcpkg" install sdl3 curl libarchive --triplet x64-windows
+          "$VCPKG_INSTALLATION_ROOT/vcpkg" install "sdl3[vulkan]" curl libarchive --triplet x64-windows
           echo "CMAKE_ARGS=-DCMAKE_TOOLCHAIN_FILE=$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake -DVCPKG_TARGET_TRIPLET=x64-windows" >> "$GITHUB_ENV"
 
       - name: Build
