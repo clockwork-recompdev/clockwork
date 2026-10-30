@@ -14,6 +14,7 @@
 #include "platform.h"
 #include "saves.h"
 #include "settings.h"
+#include "video/upscale.h"
 
 #include <SDL3/SDL.h>
 #include <imgui.h>
@@ -21,6 +22,7 @@
 #include <imgui_impl_sdlrenderer3.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cfloat>
 #include <cctype>
 #include <chrono>
@@ -38,6 +40,60 @@
 
 namespace frontend {
 namespace {
+
+// Graphics: AI texture upscaling, and Real-ESRGAN's one-time download
+#if defined(_WIN32)
+const char *const REALESRGAN_URL =
+    "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesrgan-ncnn-vulkan-20220424-windows.zip";
+#elif defined(__APPLE__)
+const char *const REALESRGAN_URL =
+    "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesrgan-ncnn-vulkan-20220424-macos.zip";
+#else
+const char *const REALESRGAN_URL =
+    "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesrgan-ncnn-vulkan-20220424-ubuntu.zip";
+#endif
+
+void ai_upscale_settings(Settings &s) {
+    static std::atomic<float> progress{0};
+    static std::atomic<int> state{0}; // 0 idle, 1 downloading, 2 failed
+    static std::string error;
+    ImGui::Checkbox("AI-upscale textures (Real-ESRGAN)", &s.ai_upscale);
+    ImGui::TextDisabled("GPU renderer: each texture is upscaled once in the background and drawn sharper from then "
+                        "on. HD texture packs win over it. Takes effect the next time the game starts.");
+    if (!s.ai_upscale) return;
+    int f = s.ai_upscale_factor >= 4 ? 1 : 0;
+    static const char *FACTORS[] = {"2x", "4x (more GPU memory; large textures stay 2x)"};
+    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 18);
+    if (ImGui::Combo("Upscale by", &f, FACTORS, 2)) s.ai_upscale_factor = f ? 4 : 2;
+    if (state == 1) {
+        ImGui::ProgressBar(progress, ImVec2(ImGui::GetFontSize() * 18, 0), "Downloading Real-ESRGAN...");
+        return;
+    }
+    if (!upscale::tool().empty()) {
+        ImGui::TextDisabled("Real-ESRGAN is installed. Upscaled textures are kept in the data folder's upscaled/.");
+        return;
+    }
+    ImGui::TextColored({1, 0.8f, 0.3f, 1}, "Needs Real-ESRGAN (ncnn Vulkan build, about 45 MB) in tools/realesrgan.");
+    if (state == 2) ImGui::TextColored({1, 0.5f, 0.3f, 1}, "%s", error.c_str());
+    if (ImGui::Button("Download Real-ESRGAN")) {
+        state = 1;
+        std::thread([] {
+            std::string e;
+            bool ok = gamebanana::fetch_archive(REALESRGAN_URL, upscale::tool_folder(), progress, e);
+            if (ok && upscale::tool().empty()) ok = false, e = "The download doesn't have realesrgan-ncnn-vulkan in it.";
+#if !defined(_WIN32)
+            std::error_code ec;
+            if (ok)
+                std::filesystem::permissions(upscale::tool(), std::filesystem::perms::owner_exec |
+                                                                  std::filesystem::perms::group_exec |
+                                                                  std::filesystem::perms::others_exec,
+                                             std::filesystem::perm_options::add, ec);
+#endif
+            if (!ok) error = e;
+            state = ok ? 0 : 2;
+        }).detach();
+    }
+}
 
 // the file dialog reports back on another thread
 std::mutex picked_lock;
@@ -1406,6 +1462,7 @@ bool run_launcher(SDL_Window *window, SDL_Renderer *renderer, const std::string 
                 ImGui::Checkbox("Frame interpolation (60 fps)", &s.frame_interpolation);
                 ImGui::TextDisabled("GPU renderer: draws in-between frames for games running at 30 fps. "
                                     "Smoother, about two frames (33 ms) later.");
+                ai_upscale_settings(s);
                 section("Window");
                 ImGui::Checkbox("Fullscreen", &s.fullscreen);
                 ImGui::Checkbox("This launcher fullscreen (F11)", &s.launcher_fullscreen);

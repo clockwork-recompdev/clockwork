@@ -19,6 +19,9 @@
 
 #include "log.h"
 #include "memory.h"
+#include "mods.h"
+#include "video/upscale.h"
+#include "platform.h"
 #include "video/pica.h"
 
 #include <SDL3/SDL.h>
@@ -32,6 +35,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <filesystem>
 #include <map>
 #include <memory>
 #include <string>
@@ -76,7 +80,7 @@ struct BlitUniforms {
 SDL_GPUDevice *dev = nullptr;
 std::atomic<int> readbacks{0}; // GPU -> guest memory copies, for YW2_FPS
 bool ok = false;
-SDL_GPUShader *vs_pica, *fs_pica, *vs_full, *fs_blit;
+SDL_GPUShader *vs_pica, *fs_pica, *fs_pica_wdepth, *vs_full, *fs_blit; // fs_pica_wdepth: writes w-buffer depth
 SDL_GPUTextureFormat depth_format;
 SDL_GPUTexture *lut_tex, *dummy_tex;
 SDL_GPUSampler *nearest_clamp, *linear_clamp;
@@ -179,8 +183,15 @@ struct CachedTexture {
     SDL_GPUTexture *tex;
     uint64_t hash;
     uint64_t last_used; // use_clock
+    uint32_t w, h;      // the GPU texture's size: the game's, or an HD replacement's
+    uint32_t changes = 0; // times its contents changed: text the game draws into it, not art
 };
 std::map<std::tuple<uint32_t, uint32_t, uint32_t, uint32_t>, CachedTexture> textures;
+// texture hashes already taken in this command list, by address and size: a map atlas is sampled by
+// a dozen draws a frame, and hashing its half a megabyte for each was most of a draw's setup. The
+// game doesn't change a texture in the middle of a list; anything that writes guest memory here
+// (downloads, fills, transfers, the guest's DMA) clears it
+std::unordered_map<uint64_t, uint64_t> list_hashes;
 std::map<int, SDL_GPUSampler *> samplers;
 std::map<std::string, SDL_GPUGraphicsPipeline *> pipelines;
 
@@ -223,7 +234,7 @@ SDL_GPUSampler *sampler(bool linear, uint32_t wrap_s, uint32_t wrap_t) {
 struct PipelineKey {
     uint32_t blend_cfg;
     uint8_t blend, color_mask, depth_test, depth_func, depth_write, stencil, stencil_func, stencil_fail,
-        stencil_zfail, stencil_zpass, stencil_read, stencil_write, has_depth, pad[3];
+        stencil_zfail, stencil_zpass, stencil_read, stencil_write, has_depth, wdepth, pad[2];
 };
 
 SDL_GPUBlendFactor blend_factor(uint32_t f) {
@@ -292,7 +303,7 @@ SDL_GPUGraphicsPipeline *pipeline(const PipelineKey &k) {
     b.color_write_mask = k.color_mask;
 
     SDL_GPUGraphicsPipelineCreateInfo info{};
-    info.vertex_shader = vs_pica, info.fragment_shader = fs_pica;
+    info.vertex_shader = vs_pica, info.fragment_shader = k.wdepth ? fs_pica_wdepth : fs_pica;
     info.vertex_input_state.vertex_buffer_descriptions = &vb;
     info.vertex_input_state.num_vertex_buffers = 1;
     info.vertex_input_state.vertex_attributes = attrs;
@@ -404,6 +415,7 @@ void prepare_surface(Surface *s) {
 // transfers and copies out of it see what the GPU drew: e.g. 3D models the game renders
 // off-screen and then copies into a texture.
 void download_surface(Surface *s) {
+    list_hashes.clear();
     readbacks++;
     int64_t t0 = now_ns();
     flush();
@@ -448,6 +460,84 @@ void download_surface(Surface *s) {
     costs.downloads++, costs.download_ns += now_ns() - t0;
 }
 
+// ---- HD textures ----
+//
+// A texture is known by a hash of its bytes in guest memory (hash_bytes), whatever its address. F10
+// dumps each new one the game uses as dump/textures/<game>/<hash>_<w>x<h>_f<format>.png, upright;
+// a PNG in an enabled mod's textures/ folder whose name starts with that hash is drawn in its place,
+// at its own size (any size: texture coordinates are relative)
+
+struct HdImage {
+    uint32_t w = 0, h = 0;
+    std::vector<uint8_t> rgba; // rows bottom-up, as decode_texture writes them; empty: couldn't load
+};
+std::unordered_map<uint64_t, std::string> hd_files; // hash -> PNG, later mods winning
+std::unordered_map<uint64_t, HdImage> hd_loaded;
+bool hd_indexed = false;
+std::atomic<bool> dumping{std::getenv("YW2_DUMP_HD") != nullptr}; // or from the start (testing)
+std::unordered_set<uint64_t> dumped;
+
+void index_hd_textures() {
+    hd_indexed = true;
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    // AI-upscaled textures first, so that a pack's own wins
+    std::vector<fs::path> folders;
+    if (upscale::on()) folders.push_back(upscale::cache_folder());
+    for (const fs::path &folder : mods::texture_folders()) folders.push_back(folder);
+    for (const fs::path &folder : folders)
+        for (auto it = fs::recursive_directory_iterator(folder, ec); it != fs::recursive_directory_iterator();
+             it.increment(ec)) {
+            std::string name = it->path().filename().string();
+            if (name.size() < 20 || it->path().extension() != ".png") continue;
+            char *end = nullptr;
+            uint64_t h = std::strtoull(name.substr(0, 16).c_str(), &end, 16);
+            if (end && *end == 0) hd_files[h] = it->path().string();
+        }
+    if (!hd_files.empty()) LOG("textures: %zu HD texture%s", hd_files.size(), hd_files.size() == 1 ? "" : "s");
+}
+
+// the HD image for a texture's hash, loaded once; null: none
+const HdImage *hd_texture(uint64_t h) {
+    if (!hd_indexed) index_hd_textures();
+    auto f = hd_files.find(h);
+    if (f == hd_files.end()) return nullptr;
+    auto [it, fresh] = hd_loaded.try_emplace(h);
+    HdImage &img = it->second;
+    if (fresh) {
+        SDL_Surface *s = SDL_LoadPNG(f->second.c_str());
+        SDL_Surface *c = s ? SDL_ConvertSurface(s, SDL_PIXELFORMAT_RGBA32) : nullptr;
+        if (c) {
+            img.w = uint32_t(c->w), img.h = uint32_t(c->h);
+            img.rgba.resize(size_t(img.w) * img.h * 4);
+            for (uint32_t y = 0; y < img.h; y++) // PNG rows run top-down
+                std::memcpy(&img.rgba[size_t(y) * img.w * 4],
+                            static_cast<const uint8_t *>(c->pixels) + size_t(img.h - 1 - y) * size_t(c->pitch), img.w * 4);
+        } else {
+            LOG("textures: couldn't load %s: %s", f->second.c_str(), SDL_GetError());
+        }
+        if (c) SDL_DestroySurface(c);
+        if (s) SDL_DestroySurface(s);
+    }
+    return img.rgba.empty() ? nullptr : &img;
+}
+
+void dump_hd(const Texture &t, uint64_t h, const std::vector<uint8_t> &rgba) {
+    if (!dumping.load(std::memory_order_relaxed) || !dumped.insert(h).second) return;
+    namespace fs = std::filesystem;
+    fs::path dir = platform::data_dir() / "dump" / "textures" / (mods::game().empty() ? "game" : mods::game());
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+    char name[64];
+    std::snprintf(name, sizeof name, "%016llx_%ux%u_f%u.png", (unsigned long long)h, t.width, t.height, t.format);
+    if (fs::exists(dir / name, ec)) return;
+    std::vector<uint8_t> upright(rgba.size());
+    size_t row = size_t(t.width) * 4;
+    for (uint32_t y = 0; y < t.height; y++) std::memcpy(&upright[y * row], &rgba[(t.height - 1 - y) * row], row);
+    SDL_Surface *s = SDL_CreateSurfaceFrom(int(t.width), int(t.height), SDL_PIXELFORMAT_RGBA32, upright.data(), int(row));
+    if (s) SDL_SavePNG(s, (dir / name).string().c_str()), SDL_DestroySurface(s);
+}
+
 SDL_GPUTexture *texture_for(const Texture &t) {
     // render-to-texture: sample the GPU copy, unless the memory has since been given new
     // contents (then it is an ordinary texture, decoded below)
@@ -457,7 +547,9 @@ SDL_GPUTexture *texture_for(const Texture &t) {
         return s->tex;
     }
     before_cpu_read(t.addr, t.bytes); // a texture inside a GPU-drawn buffer (not at its start)
-    uint64_t h = hash_bytes(t.data, t.bytes);
+    auto [known, fresh] = list_hashes.try_emplace((uint64_t(t.addr) << 32) ^ t.bytes);
+    if (fresh) known->second = hash_bytes(t.data, t.bytes);
+    uint64_t h = known->second;
     auto key = std::make_tuple(t.addr, t.width, t.height, t.format);
     auto it = textures.find(key);
     if (it != textures.end() && it->second.hash == h) {
@@ -465,15 +557,32 @@ SDL_GPUTexture *texture_for(const Texture &t) {
         return it->second.tex;
     }
     int64_t t0 = now_ns();
+    const HdImage *hd = hd_texture(h);
+    uint32_t w = hd ? hd->w : t.width, th = hd ? hd->h : t.height;
+    uint32_t changes = it != textures.end() && it->second.hash != 0 ? it->second.changes + 1 : 0;
+    if (it != textures.end() && (it->second.w != w || it->second.h != th)) { // an HD texture came or went
+        SDL_ReleaseGPUTexture(dev, it->second.tex);
+        textures.erase(it);
+        it = textures.end();
+    }
     if (it == textures.end())
-        it = textures.emplace(key, CachedTexture{make_texture(t.width, t.height, SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM,
+        it = textures.emplace(key, CachedTexture{make_texture(w, th, SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM,
                                                               SDL_GPU_TEXTUREUSAGE_SAMPLER),
-                                                 h, use_clock})
+                                                 h, use_clock, w, th})
                  .first;
     it->second.last_used = use_clock;
     it->second.hash = h;
-    TextureUpload u{it->second.tex, std::vector<uint8_t>(size_t(t.width) * t.height * 4), t.width, t.height};
-    decode_texture(t, u.rgba.data());
+    it->second.changes = std::max(it->second.changes, changes);
+    TextureUpload u{it->second.tex, {}, w, th};
+    if (hd) {
+        u.rgba = hd->rgba;
+    } else {
+        u.rgba.resize(size_t(t.width) * t.height * 4);
+        decode_texture(t, u.rgba.data());
+        dump_hd(t, h, u.rgba);
+        // not one the game keeps rewriting (its text): each version would be upscaled for nothing
+        if (it->second.changes < 3) upscale::request(h, t.width, t.height, u.rgba.data());
+    }
     texture_uploads.push_back(std::move(u));
     costs.textures++, costs.texture_ns += now_ns() - t0;
     return it->second.tex;
@@ -563,6 +672,8 @@ void fill_lighting(FragUniforms &u) {
     }
 }
 
+std::atomic<int> pass_count{0}, flush_count{0}; // for YW2_FPS: render passes and batches sent
+
 void begin_render_pass(SDL_GPUCommandBuffer *cmd, SDL_GPURenderPass *&pass, Surface *&bound_color,
                        Surface *&bound_depth, Surface *color, Surface *depth) {
     if (pass && bound_color == color && bound_depth == depth) return;
@@ -578,6 +689,7 @@ void begin_render_pass(SDL_GPUCommandBuffer *cmd, SDL_GPURenderPass *&pass, Surf
     }
     pass = SDL_BeginGPURenderPass(cmd, &ct, 1, depth ? &dt : nullptr);
     bound_color = color, bound_depth = depth;
+    pass_count++;
 }
 
 // Frees textures the game hasn't used for `idle` frames, and render targets whose content is in
@@ -787,19 +899,20 @@ float cadence = 1;               // VBlanks per top-screen frame, averaged
 constexpr float INTERP_T = 0.5f; // halfway: a frame every second VBlank
 constexpr float JUMP = 0.5f;     // mean movement (in clip-space units) past which a draw jumped
 
-// a frame's draws as drawn: for each, by match key, its triangles before culling and where each
-// one's three vertices are in `verts` (-1: culled)
+// a frame's draws as drawn: for each, by match key (draws alike share one), its triangles before
+// culling, where each one's three vertices are in `verts` (-1: culled), and where it was on screen
 struct FrameRecord {
     struct Draw {
         uint32_t tris, slots; // count, and its first entry in `slots`
+        float cx, cy;         // its vertices' mean place in normalized device coordinates
+        bool taken = false;   // matched to a draw of the next frame
     };
-    std::unordered_map<uint64_t, Draw> draws;
+    std::unordered_map<uint64_t, std::vector<Draw>> draws;
     std::vector<int32_t> slots;
     std::vector<GpuVertex> verts;
     void clear() { draws.clear(), slots.clear(), verts.clear(); }
 };
 FrameRecord last_frame, this_frame;
-std::unordered_map<uint64_t, uint32_t> occurrences; // this frame's draws so far, by key without occurrence
 int moved_3d = 0, jumped_3d = 0; // this frame's matched 3D draws, and those that jumped
 // for YW2_FPS: in-between frames made, and draws drawn into them (matched to last frame's, jumped)
 struct InterpStats {
@@ -811,12 +924,41 @@ struct InterpStats {
 
 uint64_t mix(uint64_t h, uint64_t v) { return (h ^ v) * 0x9E3779B97F4A7C15ull + (h >> 29); }
 
-// the current draw in any frame: what it draws to and with, its triangles before culling, and how
-// many draws like it came before it this frame
+// the current draw in any frame: what it draws to and with, and its triangles before culling.
+// Draws alike (ground tiles, people sharing a model) share a key, and each is matched to the one
+// nearest it last frame (see centroid): by their order, one coming into view or leaving it would
+// pair every draw after it with its neighbour, drawn stretched halfway between the two
 uint64_t match_key(const DrawRec &d) {
     uint64_t h = mix(mix(mix(1, d.color->addr), cur_tex0), cur_tris);
-    h = mix(mix(h, uint64_t(uintptr_t(d.pipeline))), regs[VS_ENTRY]);
-    return mix(h, occurrences[h]++);
+    return mix(mix(h, uint64_t(uintptr_t(d.pipeline))), regs[VS_ENTRY]);
+}
+
+// a draw's mean place on screen: its vertices in front of the eye, in normalized device coordinates
+// (those far off screen counted at its edge)
+void centroid(const GpuVertex *v, uint32_t count, float &cx, float &cy) {
+    double x = 0, y = 0;
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < count; i++) {
+        float w = v[i].pos[3];
+        if (w <= 1e-4f) continue;
+        x += std::clamp(v[i].pos[0] / w, -1.5f, 1.5f), y += std::clamp(v[i].pos[1] / w, -1.5f, 1.5f), n++;
+    }
+    cx = n ? float(x / n) : 0.0f, cy = n ? float(y / n) : 0.0f;
+}
+
+// last frame's draw like `key` nearest (cx, cy) with `tris` triangles, not matched yet; null: none
+FrameRecord::Draw *nearest_last(uint64_t key, uint32_t tris, float cx, float cy) {
+    auto it = last_frame.draws.find(key);
+    if (it == last_frame.draws.end()) return nullptr;
+    FrameRecord::Draw *best = nullptr;
+    float best_d = 0;
+    for (FrameRecord::Draw &c : it->second) {
+        if (c.taken || c.tris != tris) continue;
+        float d = (c.cx - cx) * (c.cx - cx) + (c.cy - cy) * (c.cy - cy);
+        if (!best || d < best_d) best = &c, best_d = d;
+    }
+    if (best) best->taken = true;
+    return best;
 }
 
 bool twin_live(const Surface *s) { return s->twin && s->twin_frame == frame_serial; }
@@ -845,7 +987,9 @@ void interpolate_batch() {
             this_frame.slots[slots + tri_ids[v / 3]] = int32_t(this_frame.verts.size());
             this_frame.verts.insert(this_frame.verts.end(), vertices.begin() + v, vertices.begin() + v + 3);
         }
-        this_frame.draws[d.match] = {d.tris, slots};
+        float cx, cy;
+        centroid(&vertices[d.first], d.count, cx, cy);
+        this_frame.draws[d.match].push_back({d.tris, slots, cx, cy});
         // the bottom screen shows the game's frames as they come
         d.interpolated = interp_this && d.color->height != 320;
         if (!d.interpolated) continue;
@@ -853,10 +997,10 @@ void interpolate_batch() {
         size_t at = mid.size();
         mid.insert(mid.end(), vertices.begin() + d.first, vertices.begin() + d.first + d.count);
         interp_stats.draws++;
-        auto it = last_frame.draws.find(d.match);
-        if (it == last_frame.draws.end() || it->second.tris != d.tris) continue;
+        const FrameRecord::Draw *was = nearest_last(d.match, d.tris, cx, cy);
+        if (!was) continue;
         interp_stats.matched++;
-        auto last_slot = [&](uint32_t v) { return last_frame.slots[it->second.slots + tri_ids[v / 3]]; };
+        auto last_slot = [&](uint32_t v) { return last_frame.slots[was->slots + tri_ids[v / 3]]; };
         bool perspective = false;
         double moved = 0;
         int n = 0;
@@ -867,7 +1011,12 @@ void interpolate_batch() {
                 const GpuVertex &a = last_frame.verts[size_t(s) + k], &b = vertices[v + k];
                 perspective |= std::fabs(b.pos[3] - 1.0f) > 1e-4f;
                 if (a.pos[3] <= 1e-4f || b.pos[3] <= 1e-4f) continue;
-                moved += std::fabs(a.pos[0] / a.pos[3] - b.pos[0] / b.pos[3]) + std::fabs(a.pos[1] / a.pos[3] - b.pos[1] / b.pos[3]);
+                // movement on screen: a vertex next to the eye (ground under the camera) lands far
+                // off it, where a small step is a huge one, and would make its whole draw look like
+                // it jumped (then drawn where it is now, cracks open against its neighbours)
+                auto on_screen = [](float c, float w) { return std::clamp(c / w, -1.5f, 1.5f); };
+                moved += std::fabs(on_screen(a.pos[0], a.pos[3]) - on_screen(b.pos[0], b.pos[3])) +
+                         std::fabs(on_screen(a.pos[1], a.pos[3]) - on_screen(b.pos[1], b.pos[3]));
                 n++;
             }
         }
@@ -957,7 +1106,6 @@ void end_interp_frame() {
     interp_stats.intervals[std::min<uint64_t>(std::max<uint64_t>(interval, 1), 4) - 1]++;
     std::swap(last_frame, this_frame);
     this_frame.clear();
-    occurrences.clear();
     moved_3d = jumped_3d = 0;
     frame_serial++;
     bool want = interp_wanted.load();
@@ -987,9 +1135,10 @@ bool init(SDL_GPUDevice *device) {
     }
     vs_pica = make_shader(SPIRV_pica_vert, sizeof SPIRV_pica_vert, SDL_GPU_SHADERSTAGE_VERTEX, 0, 1);
     fs_pica = make_shader(SPIRV_pica_frag, sizeof SPIRV_pica_frag, SDL_GPU_SHADERSTAGE_FRAGMENT, 4, 1);
+    fs_pica_wdepth = make_shader(SPIRV_pica_wdepth_frag, sizeof SPIRV_pica_wdepth_frag, SDL_GPU_SHADERSTAGE_FRAGMENT, 4, 1);
     vs_full = make_shader(SPIRV_fullscreen_vert, sizeof SPIRV_fullscreen_vert, SDL_GPU_SHADERSTAGE_VERTEX, 0, 0);
     fs_blit = make_shader(SPIRV_blit_lcd_frag, sizeof SPIRV_blit_lcd_frag, SDL_GPU_SHADERSTAGE_FRAGMENT, 1, 1);
-    if (!vs_pica || !fs_pica || !vs_full || !fs_blit) return false;
+    if (!vs_pica || !fs_pica || !fs_pica_wdepth || !vs_full || !fs_blit) return false;
 
     depth_format = SDL_GPU_TEXTUREFORMAT_D24_UNORM_S8_UINT;
     if (!SDL_GPUTextureSupportsFormat(dev, depth_format, SDL_GPU_TEXTURETYPE_2D,
@@ -1025,8 +1174,23 @@ bool init(SDL_GPUDevice *device) {
 
 bool active() { return ok; }
 int take_readback_count() { return readbacks.exchange(0); }
+void take_pass_counts(int *passes, int *flushes) { *passes = pass_count.exchange(0), *flushes = flush_count.exchange(0); }
 
 bool fit_viewport(DrawRec &d);
+
+void begin_list() {
+    list_hashes.clear();
+    // AI-upscaled textures that are ready: drawn in place of the originals from their next use
+    if (!upscale::on()) return;
+    if (!hd_indexed) index_hd_textures();
+    for (auto &[h, path] : upscale::take_ready()) {
+        if (hd_files.count(h)) continue; // a pack has its own
+        hd_files[h] = path;
+        hd_loaded.erase(h);
+        for (auto &[key, c] : textures)
+            if (c.hash == h) c.hash = 0; // uploaded again, as the HD image
+    }
+}
 
 void begin_draw() {
     cur_skip = true;
@@ -1116,6 +1280,7 @@ void begin_draw() {
     uint32_t dm = regs[DEPTH_COLOR_MASK];
     k.color_mask = regs[COLOR_WRITE_ALLOW] ? uint8_t((dm >> 8) & 0xF) : 0;
     k.has_depth = d.depth != nullptr;
+    k.wdepth = k.has_depth && wbuffer; // the shader writes the depth (see pica.frag)
     bool can_write = regs[DEPTH_STENCIL_WRITE_ALLOW] != 0;
     k.depth_test = dm & 1, k.depth_func = uint8_t((dm >> 4) & 7), k.depth_write = ((dm >> 12) & 1) && can_write;
     uint32_t st = regs[STENCIL_TEST], so = regs[STENCIL_OP];
@@ -1603,6 +1768,7 @@ void end_draw() {
 void flush() {
     if (batch.empty() && texture_uploads.empty() && surface_loads.empty() && depth_clears.empty() && !lut_upload)
         return;
+    flush_count++;
     anchor_groups(); // before the vertices go to the GPU
     if (interp_on) interpolate_batch();
     std::vector<Surface *> reloaded;
@@ -1654,6 +1820,7 @@ void flush() {
                 dt.store_op = dt.stencil_store_op = SDL_GPU_STOREOP_STORE;
                 pass = SDL_BeginGPURenderPass(cmd, &ct, 1, depth ? &dt : nullptr);
                 bound_color = color, bound_depth = depth;
+                pass_count++;
             }
             SDL_BindGPUGraphicsPipeline(pass, d.pipeline);
             SDL_SetGPUViewport(pass, &d.viewport);
@@ -1685,6 +1852,7 @@ void flush() {
 }
 
 bool memory_fill(uint32_t start, uint32_t end, uint32_t value, uint32_t control) {
+    list_hashes.clear();
     if (!ok || !start || end <= start) return false;
     uint32_t p = to_physical(start);
     bool hit = false;
@@ -1729,6 +1897,7 @@ bool memory_fill(uint32_t start, uint32_t end, uint32_t value, uint32_t control)
 bool display_transfer(uint32_t in, uint32_t out, uint32_t in_w, uint32_t in_h, uint32_t out_w, uint32_t out_h,
                       uint32_t flags) {
     if (!ok) return false;
+    list_hashes.clear();
     if (in_h == 400) { // a top-screen frame is done
         anchor_groups();
         placed.clear();
@@ -1853,6 +2022,7 @@ void before_cpu_read(uint32_t addr, uint32_t size) {
 
 void invalidate(uint32_t addr, uint32_t size) {
     if (!ok) return;
+    list_hashes.clear();
     uint32_t p = to_physical(addr);
     for (auto &s : surfaces)
         if (p < s->addr + s->bytes() && s->addr < p + size) s->reload = true, s->drawn = false; // guest is newer
@@ -1899,4 +2069,5 @@ SDL_GPUTexture *lcd_frame(uint32_t addr, int *width, int *height) {
 
 namespace pica {
 void set_frame_interpolation(bool on) { gpu::interp_wanted = on; }
+bool toggle_texture_dump() { return !gpu::dumping.exchange(!gpu::dumping.load()); }
 } // namespace pica

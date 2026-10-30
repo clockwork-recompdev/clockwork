@@ -1,3 +1,11 @@
+# Discontinuation of project
+This may come as a surprise to many of you, as this had just come out. However, I have come to the realization that this shit is fucking boring.
+It's not fulfilling whatsoever to let AI do this for you. It's unfulfilling, lazy, and overall boring.
+I will no longer be updating this project. Fork it, play with it, do whatever, but I personally will no longer be providing support for this.
+
+Pick up a keyboard, and learn to code.
+
+
 # Clockwork
 
 Native PC versions of the **Yo-kai Watch games on the Nintendo 3DS**, made by static

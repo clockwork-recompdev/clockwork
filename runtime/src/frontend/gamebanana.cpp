@@ -292,4 +292,38 @@ bool install(const std::string &game, const Mod &mod, const File &file, std::ato
     return true;
 }
 
+bool fetch_archive(const std::string &url, const fs::path &to, std::atomic<float> &progress, std::string &error) {
+    std::error_code ec;
+    fs::path work = to.parent_path() / (to.filename().string() + ".download");
+    fs::remove_all(work, ec), fs::remove_all(to, ec);
+    fs::create_directories(work, ec), fs::create_directories(to, ec);
+    progress = 0;
+    {
+        std::ofstream out(work / "archive", std::ios::binary);
+        CURL *c = handle(url);
+        if (!c || !out) return error = "Couldn't start the download.", false;
+        curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, +[](char *p, size_t s, size_t n, void *u) {
+            return static_cast<std::ofstream *>(u)->write(p, std::streamsize(s * n)) ? s * n : 0;
+        });
+        curl_easy_setopt(c, CURLOPT_WRITEDATA, &out);
+        curl_easy_setopt(c, CURLOPT_NOPROGRESS, 0L);
+        curl_easy_setopt(c, CURLOPT_XFERINFODATA, &progress);
+        curl_easy_setopt(c, CURLOPT_XFERINFOFUNCTION,
+                         +[](void *u, curl_off_t total, curl_off_t now, curl_off_t, curl_off_t) {
+                             if (total > 0) *static_cast<std::atomic<float> *>(u) = 0.9f * float(now) / float(total);
+                             return 0;
+                         });
+        CURLcode r = curl_easy_perform(c);
+        curl_easy_cleanup(c);
+        if (r != CURLE_OK) {
+            fs::remove_all(work, ec);
+            return error = std::string("The download failed: ") + curl_easy_strerror(r), false;
+        }
+    }
+    bool ok = extract(work / "archive", to, error);
+    fs::remove_all(work, ec);
+    progress = 1;
+    return ok;
+}
+
 } // namespace gamebanana

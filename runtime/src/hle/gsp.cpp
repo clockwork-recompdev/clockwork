@@ -12,6 +12,7 @@
 #include "video/gpu/gpu.h"
 #include "video/pica.h"
 
+#include <algorithm>
 #include <array>
 #include <cstdlib>
 #include <cstring>
@@ -99,6 +100,10 @@ struct Gsp : Service {
             pica::SceneInfo si = pica::scene_info();
             LOG("scene: top %d draws (%d 3D), bottom %d draws, %zu bottom textures; %d GPU readbacks in 5 s", si.top_draws,
                 si.top_3d_draws, si.bottom_draws, si.bottom_textures.size(), pica::gpu::take_readback_count());
+            int passes, flushes;
+            pica::gpu::take_pass_counts(&passes, &flushes);
+            LOG("gpu: %.0f render passes and %.0f batches a frame", passes / std::max(1.0, double(frames_rendered)),
+                flushes / std::max(1.0, double(frames_rendered)));
             LOG("fps: %.1f  (per second: commands %.0f ms [draw setup %.0f, vertices %.0f for %lld], raster %.0f ms, "
                 "transfers %.0f ms)",
                 frames_rendered / 5.0, pica::time_commands.exchange(0) / 5e6, pica::time_setup.exchange(0) / 5e6,

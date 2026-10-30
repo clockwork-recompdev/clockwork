@@ -3,6 +3,7 @@
 // (see mods.h). Uses its public API; no account. Everything here blocks: call it off the UI thread.
 #include <atomic>
 #include <cstdint>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -31,5 +32,9 @@ bool mod_files(long long mod, std::vector<File> &out, std::string &error);
 // archive. `progress` goes from 0 to 1. False (and `error`, readable) if it can't be installed.
 bool install(const std::string &game, const Mod &mod, const File &file, std::atomic<float> &progress,
              std::string &error);
+
+// Downloads an archive (https) and unpacks it into `to` (emptied first). `progress` goes from 0 to 1.
+bool fetch_archive(const std::string &url, const std::filesystem::path &to, std::atomic<float> &progress,
+                   std::string &error);
 
 } // namespace gamebanana

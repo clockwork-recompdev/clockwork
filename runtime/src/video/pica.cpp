@@ -766,6 +766,7 @@ SceneInfo scene_info() {
 
 void run_command_list(uint32_t addr, uint32_t size) {
     auto t0 = std::chrono::steady_clock::now();
+    if (gpu::active()) gpu::begin_list();
     process_command_list(addr, size);
     auto t1 = std::chrono::steady_clock::now();
     flush_draws(); // the GPU is done with this list once everything in it is drawn

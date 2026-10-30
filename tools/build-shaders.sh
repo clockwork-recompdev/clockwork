@@ -15,6 +15,11 @@ TMP=$(mktemp -d)
         od -An -v -tx1 "$TMP/$f.spv" | sed 's/ *\([0-9a-f][0-9a-f]\)/0x\1,/g; s/^/    /'
         echo "};"
     done
+    # pica.frag again, writing w-buffer depth (see the shader)
+    glslc -O --target-env=vulkan1.0 -DWDEPTH "$S/pica.frag" -o "$TMP/pica_wdepth.frag.spv"
+    echo "static const unsigned char SPIRV_pica_wdepth_frag[] = {"
+    od -An -v -tx1 "$TMP/pica_wdepth.frag.spv" | sed 's/ *\([0-9a-f][0-9a-f]\)/0x\1,/g; s/^/    /'
+    echo "};"
 } > "$OUT"
 rm -rf "$TMP"
 echo "wrote $OUT"

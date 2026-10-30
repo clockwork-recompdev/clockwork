@@ -16,6 +16,14 @@ namespace mods {
 
 fs::path game_folder(const std::string &game) { return platform::data_dir() / "mods" / game; }
 
+namespace {
+std::vector<fs::path> textures;
+std::string current_game;
+} // namespace
+
+const std::vector<fs::path> &texture_folders() { return textures; }
+const std::string &game() { return current_game; }
+
 void apply(Dump &dump, const std::string &game, uint64_t program_id) {
     std::error_code ec;
     fs::create_directories(platform::data_dir() / "mods", ec); // so it's there to find
@@ -26,6 +34,9 @@ void apply(Dump &dump, const std::string &game, uint64_t program_id) {
         for (auto &e : fs::directory_iterator(game_folder(game), ec))
             if (e.is_directory(ec) && !fs::exists(e.path() / "disabled", ec)) enabled.push_back(e.path());
     std::sort(enabled.begin(), enabled.end());
+    current_game = game;
+    for (const fs::path &mod : enabled)
+        if (fs::is_directory(mod / "textures", ec)) textures.push_back(mod / "textures");
 
     // include/ (and loose/): files inside archives, later mods winning
     std::map<std::string, std::pair<std::string, uint64_t>> inner; // archive path -> (host file, size)

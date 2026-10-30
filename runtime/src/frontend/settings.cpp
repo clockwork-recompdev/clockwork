@@ -129,6 +129,8 @@ void Settings::load() {
         else if (k == "camera_zoom") camera_zoom = std::atoi(v.c_str());
         else if (k == "gpu_renderer") gpu_renderer = b;
         else if (k == "frame_interpolation") frame_interpolation = b;
+        else if (k == "ai_upscale") ai_upscale = b;
+        else if (k == "ai_upscale_factor") ai_upscale_factor = std::atoi(v.c_str()) >= 4 ? 4 : 2;
         else if (k == "prefer_integrated_gpu") prefer_integrated_gpu = b;
         else if (k == "volume") volume = std::atoi(v.c_str());
         else if (k == "audio_device") audio_device = v;
@@ -178,6 +180,8 @@ void Settings::save() const {
       << "camera_zoom=" << camera_zoom << "\n"
       << "gpu_renderer=" << gpu_renderer << "\n"
       << "frame_interpolation=" << frame_interpolation << "\n"
+      << "ai_upscale=" << ai_upscale << "\n"
+      << "ai_upscale_factor=" << ai_upscale_factor << "\n"
       << "prefer_integrated_gpu=" << prefer_integrated_gpu << "\n"
       << "volume=" << volume << "\n"
       << "audio_device=" << audio_device << "\n"

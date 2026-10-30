@@ -15,8 +15,10 @@ namespace pica::gpu {
 bool init(SDL_GPUDevice *device);
 bool active();
 int take_readback_count(); // readbacks since the last call
+void take_pass_counts(int *passes, int *flushes); // render passes and batches since the last call
 
 // the draw pipeline, mirroring the software rasterizer's entry points
+void begin_list(); // a command list starts: textures may have changed since the last one
 void begin_draw();
 void triangle(const Vertex &v0, const Vertex &v1, const Vertex &v2);
 void end_draw();

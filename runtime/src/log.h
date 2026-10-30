@@ -11,10 +11,22 @@ extern bool ipc;
 extern bool gpu;
 extern bool dsp;
 void init();
+
+// svc and ipc lines not printed are kept in memory (the last minute or so), for a capture to save:
+// what the game was doing when something went wrong in a long session. YW2_NO_RECENT turns it off
+extern bool recent;
+void remember(const char *fmt, ...)
+#if defined(__GNUC__)
+    __attribute__((format(printf, 1, 2)))
+#endif
+    ;
+void save_recent(const char *path);
 }
 
-#define LOG_SVC(...) (log_cfg::svc ? (void)LOG("[svc] " __VA_ARGS__) : (void)0)
-#define LOG_IPC(...) (log_cfg::ipc ? (void)LOG("[ipc] " __VA_ARGS__) : (void)0)
+#define LOG_SVC(...) \
+    (log_cfg::svc ? (void)LOG("[svc] " __VA_ARGS__) : log_cfg::recent ? log_cfg::remember("[svc] " __VA_ARGS__) : (void)0)
+#define LOG_IPC(...) \
+    (log_cfg::ipc ? (void)LOG("[ipc] " __VA_ARGS__) : log_cfg::recent ? log_cfg::remember("[ipc] " __VA_ARGS__) : (void)0)
 #define LOG_GPU(...) (log_cfg::gpu ? (void)LOG("[gpu] " __VA_ARGS__) : (void)0)
 #define LOG_DSP(...) (log_cfg::dsp ? (void)LOG("[dsp] " __VA_ARGS__) : (void)0)
 

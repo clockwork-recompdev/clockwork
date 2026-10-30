@@ -9,10 +9,12 @@
 #include "handoff.h"
 
 #include "launcher.h"
+#include "kernel/kernel.h"
 #include "log.h"
 #include "settings.h"
 #include "video/gpu/gpu.h"
 #include "video/pica.h"
+#include "video/upscale.h"
 #include "platform.h"
 
 #include <SDL3/SDL.h>
@@ -191,6 +193,120 @@ struct InputScript {
         }
     }
 } input_script;
+
+// YW2_CONTROL=<dir>: input driven step by step from outside, for unattended play. Lines appended to
+// <dir>/cmd run in order: "hold <buttons> <frames>" (buttons joined by +: a b x y l r start select
+// up down left right, cup cdown cleft cright), "tap <x> <y> <frames>" (bottom screen), "wait <frames>",
+// "shot <name>" (the window, as <dir>/<name>.png) and "log <text>" (a marker in the log).
+// <dir>/status says how many lines are done.
+struct Control {
+    std::filesystem::path dir;
+    std::mutex lock;
+    Input held;
+    std::vector<std::string> lines;
+    size_t next = 0, read_bytes = 0;
+    int until = -1; // the frame the current hold or wait ends at
+    std::string pending_shot;
+
+    Control() {
+        if (const char *env = std::getenv("YW2_CONTROL")) dir = env;
+    }
+    explicit operator bool() const { return !dir.empty(); }
+
+    static Input parse_buttons(const std::string &spec) {
+        static const std::pair<const char *, uint32_t> names[] = {
+            {"a", BTN_A},       {"b", BTN_B},         {"x", BTN_X},       {"y", BTN_Y},
+            {"l", BTN_L},       {"r", BTN_R},         {"start", BTN_START}, {"select", BTN_SELECT},
+            {"up", BTN_UP},     {"down", BTN_DOWN},   {"left", BTN_LEFT}, {"right", BTN_RIGHT},
+        };
+        Input in;
+        size_t pos = 0;
+        while (pos <= spec.size()) {
+            size_t end = spec.find('+', pos);
+            if (end == std::string::npos) end = spec.size();
+            std::string n = spec.substr(pos, end - pos);
+            pos = end + 1;
+            for (auto &[name, bit] : names)
+                if (n == name) in.buttons |= bit;
+            if (n == "cup") in.circle_y = CIRCLE_MAX;
+            if (n == "cdown") in.circle_y = -CIRCLE_MAX;
+            if (n == "cleft") in.circle_x = -CIRCLE_MAX;
+            if (n == "cright") in.circle_x = CIRCLE_MAX;
+        }
+        return in;
+    }
+
+    void apply(Input &in) {
+        std::lock_guard lk(lock);
+        in.buttons |= held.buttons;
+        if (held.circle_x || held.circle_y) in.circle_x = held.circle_x, in.circle_y = held.circle_y;
+        if (held.touching) in.touching = true, in.touch_x = held.touch_x, in.touch_y = held.touch_y;
+    }
+
+    // render thread, each window frame: reads new commands, advances them, takes a due screenshot
+    void tick(int frame, SDL_Renderer *renderer) {
+        if (std::ifstream f{dir / "cmd", std::ios::binary}) {
+            f.seekg(0, std::ios::end);
+            size_t size = size_t(f.tellg());
+            if (size > read_bytes) {
+                std::string text(size - read_bytes, '\0');
+                f.seekg(std::streamoff(read_bytes));
+                f.read(text.data(), std::streamsize(text.size()));
+                size_t last = text.rfind('\n');
+                if (last != std::string::npos) {
+                    read_bytes += last + 1;
+                    size_t pos = 0;
+                    while (pos <= last) {
+                        size_t end = text.find('\n', pos);
+                        lines.push_back(text.substr(pos, end - pos));
+                        pos = end + 1;
+                    }
+                }
+            }
+        }
+        bool changed = false;
+        while (true) {
+            if (until >= 0 && frame < until) break;
+            if (until >= 0) {
+                std::lock_guard lk(lock);
+                held = {}, until = -1, changed = true;
+            }
+            if (next >= lines.size()) break;
+            std::string line = lines[next++];
+            changed = true;
+            char word[16] = {}, arg[64] = {};
+            int a = 0, b = 0, c = 0;
+            if (std::sscanf(line.c_str(), "%15s", word) != 1) continue;
+            std::string w = word;
+            if (w == "hold" && std::sscanf(line.c_str(), "%*s %63s %d", arg, &a) == 2) {
+                std::lock_guard lk(lock);
+                held = parse_buttons(arg), until = frame + a;
+            } else if (w == "tap" && std::sscanf(line.c_str(), "%*s %d %d %d", &a, &b, &c) == 3) {
+                std::lock_guard lk(lock);
+                held = {}, held.touching = true, held.touch_x = uint16_t(a), held.touch_y = uint16_t(b);
+                until = frame + c;
+            } else if (w == "wait" && std::sscanf(line.c_str(), "%*s %d", &a) == 1) {
+                until = frame + a;
+            } else if (w == "log") {
+                LOG("control: %s", line.c_str() + std::min<size_t>(line.size(), 4));
+            } else if (w == "shot" && std::sscanf(line.c_str(), "%*s %63s", arg) == 1) {
+                SDL_Surface *surface = SDL_RenderReadPixels(renderer, nullptr);
+                std::string file = (dir / (std::string(arg) + ".png")).string();
+                if (!surface || !SDL_SavePNG(surface, file.c_str())) LOG("control shot %s: %s", file.c_str(), SDL_GetError());
+                if (surface) SDL_DestroySurface(surface);
+            }
+        }
+        static int last_frame = -1000;
+        if (changed || frame - last_frame >= 60) {
+            last_frame = frame;
+            std::ofstream st{dir / "status.tmp"};
+            st << "done " << next << " of " << lines.size() << " frame " << frame << "\n";
+            st.close();
+            std::error_code ec;
+            std::filesystem::rename(dir / "status.tmp", dir / "status", ec);
+        }
+    }
+} control;
 std::atomic<int> top_frames{0};
 
 // audio: an SDL stream that resamples the DSP's 32728 Hz output to the device rate
@@ -481,6 +597,7 @@ Input input() {
     std::lock_guard lk(input_lock);
     Input in = current_input;
     input_script.apply(top_frames, in);
+    control.apply(in);
     title_capture.press(top_frames, in);
     return in;
 }
@@ -617,7 +734,15 @@ void run(void (*start)(const char *dump), const char *cli_dump, bool force_launc
                 SDL_DestroyGPUDevice(device);
                 device = nullptr;
             }
-            if (!device) LOG("no GPU device for the GPU renderer (%s); drawing on the CPU", SDL_GetError());
+            if (!device) {
+                // the shaders are SPIR-V, which only SDL's Vulkan backend takes: an SDL built
+                // without Vulkan (vcpkg's sdl3 without [vulkan]) has no backend for them at all
+                bool vulkan = false;
+                for (int i = 0; i < SDL_GetNumGPUDrivers(); i++)
+                    vulkan |= std::string_view(SDL_GetGPUDriver(i)) == "vulkan";
+                LOG("no GPU device for the GPU renderer (%s%s); drawing on the CPU", SDL_GetError(),
+                    vulkan ? "" : "; this SDL3 was built without Vulkan, which the GPU renderer needs");
+            }
         }
         if (!renderer && !(renderer = SDL_CreateRenderer(window, nullptr)))
             fatal("cannot create a renderer: %s", SDL_GetError());
@@ -661,6 +786,9 @@ void run(void (*start)(const char *dump), const char *cli_dump, bool force_launc
     pica::set_hud_scale(float(s.hud_size) / 100.0f);
     pica::set_camera_zoom(float(s.camera_zoom) / 100.0f);
     pica::set_frame_interpolation(s.frame_interpolation);
+    bool ai = s.ai_upscale;
+    if (const char *e = std::getenv("YW2_AI_UPSCALE")) ai = std::atoi(e) != 0; // test override
+    upscale::configure(ai && pica::gpu::active(), s.ai_upscale_factor);
     if (const char *e = std::getenv("YW2_INTERP")) pica::set_frame_interpolation(std::atoi(e) != 0);
     if (const char *e = std::getenv("YW2_ZOOM")) pica::set_camera_zoom(float(std::atoi(e)) / 100.0f);
     if (const char *e = std::getenv("YW2_HUD")) pica::set_hud_scale(float(std::atoi(e)) / 100.0f);
@@ -710,11 +838,21 @@ void run(void (*start)(const char *dump), const char *cli_dump, bool force_launc
     int burst_left = 0; // Shift+F12: frames still to save, one after another
     std::filesystem::path burst_dir;
     // renderer textures wrapping the GPU renderer's frame textures
-    std::map<SDL_GPUTexture *, SDL_Texture *> wrapped;
+    // and the size each was made for: the GPU renderer remakes its frame textures when a frame's
+    // size changes, and a new one can come back at a freed one's address; shown with the old
+    // size, only its top-left part filled the screen
+    struct Wrapped {
+        SDL_Texture *tex = nullptr;
+        int w = 0, h = 0;
+    };
+    std::map<SDL_GPUTexture *, Wrapped> wrapped;
     SDL_Texture *shown_gpu[2] = {nullptr, nullptr};
     auto gpu_texture = [&](SDL_GPUTexture *t, int w, int h) {
-        SDL_Texture *&tex = wrapped[t];
+        Wrapped &wr = wrapped[t];
+        if (wr.tex && (wr.w != w || wr.h != h)) SDL_DestroyTexture(wr.tex), wr.tex = nullptr;
+        SDL_Texture *&tex = wr.tex;
         if (!tex) {
+            wr.w = w, wr.h = h;
             SDL_PropertiesID p = SDL_CreateProperties();
             SDL_SetPointerProperty(p, SDL_PROP_TEXTURE_CREATE_GPU_TEXTURE_POINTER, t);
             SDL_SetNumberProperty(p, SDL_PROP_TEXTURE_CREATE_FORMAT_NUMBER, SDL_PIXELFORMAT_RGBA32);
@@ -770,6 +908,9 @@ void run(void (*start)(const char *dump), const char *cli_dump, bool force_launc
                     s.save();
                 }
                 if (e.key.scancode == SDL_SCANCODE_F9) s.single_screen = !s.single_screen, relayout();
+                if (e.key.scancode == SDL_SCANCODE_F10)
+                    show_message(pica::toggle_texture_dump() ? "Saving textures to dump/textures (F10 to stop)"
+                                                             : "Stopped saving textures");
                 if (e.key.scancode == SDL_SCANCODE_TAB) s.swap_screens = !s.swap_screens, relayout();
                 if (e.key.scancode == SDL_SCANCODE_F8) s.picture_in_picture = !s.picture_in_picture, relayout();
                 if (e.key.scancode == SDL_SCANCODE_F6) s.smart_layout = !s.smart_layout, relayout();
@@ -910,6 +1051,7 @@ void run(void (*start)(const char *dump), const char *cli_dump, bool force_launc
                 if (++shots_taken >= count) std::_Exit(0);
             }
         }
+        if (control) control.tick(top_frames, renderer);
         if (burst_left > 0) {
             if (SDL_Surface *surface = SDL_RenderReadPixels(renderer, nullptr)) {
                 char file[16];
@@ -930,6 +1072,13 @@ void run(void (*start)(const char *dump), const char *cli_dump, bool force_launc
                 SDL_DestroySurface(surface);
             }
             pica::request_draw_log((dir / (name + "_draws.txt")).string());
+            // what the game did lately and what each of its threads waits on, for bugs that build up
+            // over a session (the map's missing chunks)
+            log_cfg::save_recent((dir / (name + "_recent.txt")).string().c_str());
+            if (std::FILE *f = std::fopen((dir / (name + "_threads.txt")).string().c_str(), "w")) {
+                kernel::dump_threads(f);
+                std::fclose(f);
+            }
             pica::SceneInfo scene = pica::scene_info();
             std::ofstream f(dir / (name + ".txt"));
             f << "context " << CONTEXT_NAMES[classify(scene)] << "\ntop_draws " << scene.top_draws << "\ntop_3d_draws "

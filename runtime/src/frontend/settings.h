@@ -42,6 +42,8 @@ struct Settings {
     int camera_zoom = 90; // percent, in widescreen: the 3D scene's size (less shows more of it)
     bool gpu_renderer = true; // draw on the GPU (SDL_GPU); off: the software renderer
     bool frame_interpolation = false; // GPU renderer: 30 fps games shown at 60 (in-between frames)
+    bool ai_upscale = false;          // GPU renderer: textures upscaled by Real-ESRGAN (video/upscale.h)
+    int ai_upscale_factor = 2;        // 2 or 4
     bool prefer_integrated_gpu = false; // on laptops with two GPUs: the power-saving one
     // one-screen layouts chosen with F5: "<game>.<kind of scene>" -> layout (see sdl.cpp)
     std::map<std::string, std::string> layouts;

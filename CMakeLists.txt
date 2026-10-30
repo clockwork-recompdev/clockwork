@@ -108,6 +108,7 @@ add_library(runtime OBJECT
     runtime/src/video/shader.cpp
     runtime/src/video/texture.cpp
     runtime/src/video/transfer.cpp
+    runtime/src/video/upscale.cpp
     runtime/src/video/widescreen.cpp
 )
 target_include_directories(runtime PUBLIC runtime/src runtime/include)

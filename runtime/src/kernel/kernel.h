@@ -14,6 +14,7 @@
 
 #include <condition_variable>
 #include <cstdint>
+#include <cstdio>
 #include <deque>
 #include <functional>
 #include <map>
@@ -239,7 +240,7 @@ void schedule_timer(uint64_t ns, std::function<void()> fn);
 void schedule_periodic(uint64_t ns, std::function<void()> fn);
 
 // prints every guest thread and what it's waiting on (debugging hangs)
-void dump_threads();
+void dump_threads(std::FILE *to = stderr);
 
 std::shared_ptr<Thread> create_thread(uint32_t entry, uint32_t arg, uint32_t stack_top, int32_t priority);
 [[noreturn]] void exit_current_thread(std::unique_lock<std::mutex> &lk);

@@ -242,23 +242,24 @@ void main() {
     ivec4 frag_primary = ivec4(0), frag_secondary = ivec4(0);
     if ((flags.x & 1) != 0) lighting(tex, frag_primary, frag_secondary);
 
-    ivec4 src[16];
-    for (int i = 0; i < 16; i++) src[i] = ivec4(0);
-    src[0] = to_u8(v_color);
-    src[1] = frag_primary;
-    src[2] = frag_secondary;
-    src[3] = tex[0];
-    src[4] = tex[1];
-    src[5] = tex[2];
-    ivec4 next_buffer = to_u8(buffer_init);
-    src[13] = next_buffer;
+    // the combiner's sources, picked by plain branches: which source a stage reads is the same for
+    // every fragment of a draw, while indexing an array of them per fragment put it in slow memory
+    ivec4 primary = to_u8(v_color), previous = ivec4(0), konst = ivec4(0);
+    ivec4 buf = to_u8(buffer_init), next_buffer = buf;
     for (int i = 0; i < misc.x; i++) {
-        src[14] = to_u8(tev_const[i]);
+        konst = to_u8(tev_const[i]);
         ivec3 c[3];
         int a[3];
         for (int k = 0; k < 3; k++) {
-            c[k] = color_operand(src[field(tev_src[i].x, k)], field(tev_src[i].z, k));
-            a[k] = alpha_operand(src[field(tev_src[i].y, k)], field(tev_src[i].w, k));
+            int cs = field(tev_src[i].x, k), as = field(tev_src[i].y, k);
+            ivec4 cv = cs == 0 ? primary : cs == 1 ? frag_primary : cs == 2 ? frag_secondary : cs == 3 ? tex[0]
+                     : cs == 4 ? tex[1] : cs == 5 ? tex[2] : cs == 13 ? buf : cs == 14 ? konst
+                     : cs == 15 ? previous : ivec4(0);
+            ivec4 av = as == 0 ? primary : as == 1 ? frag_primary : as == 2 ? frag_secondary : as == 3 ? tex[0]
+                     : as == 4 ? tex[1] : as == 5 ? tex[2] : as == 13 ? buf : as == 14 ? konst
+                     : as == 15 ? previous : ivec4(0);
+            c[k] = color_operand(cv, field(tev_src[i].z, k));
+            a[k] = alpha_operand(av, field(tev_src[i].w, k));
         }
         int cop = tev_op[i].x, aop = tev_op[i].y;
         ivec4 o;
@@ -268,22 +269,22 @@ void main() {
             o.rgb = min(combine3(cop, c[0], c[1], c[2]) << tev_op[i].z, 255);
         }
         o.a = cop == 7 ? o.r : min(combine1(aop, a[0], a[1], a[2]) << tev_op[i].w, 255);
-        src[15] = o;
-        src[13] = next_buffer; // the buffer source lags one stage behind its update
+        previous = o;
+        buf = next_buffer; // the buffer source lags one stage behind its update
         if (i < 4) {
             if (((misc.y >> i) & 1) != 0) next_buffer.rgb = o.rgb;
             if (((misc.y >> (4 + i)) & 1) != 0) next_buffer.a = o.a;
         }
     }
-    ivec4 color = src[15];
+    ivec4 color = previous;
 
-    float depth = gl_FragCoord.z;
-    if ((flags.x & 32) != 0) {
-        depth = clamp(v_wdepth, 0.0, 1.0);
-        gl_FragDepth = depth;
-    } else {
-        gl_FragDepth = gl_FragCoord.z;
-    }
+    // the w-buffer (depth from w, not z) is the only depth this shader writes: compiled as the
+    // WDEPTH variant for its draws. Writing gl_FragDepth at all turns off the GPU's early depth
+    // test, so every hidden fragment (foliage, walls) would be shaded; at 4x that was most of a frame
+    float depth = (flags.x & 32) != 0 ? clamp(v_wdepth, 0.0, 1.0) : gl_FragCoord.z;
+#ifdef WDEPTH
+    gl_FragDepth = depth;
+#endif
 
     if ((flags.x & 2) != 0) { // fog, by depth
         float index = ((flags.x & 4) != 0 ? 1.0 - depth : depth) * 128.0;

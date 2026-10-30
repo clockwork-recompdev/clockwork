@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <ctime>
 #include <cstdlib>
 #include <random>
 
@@ -261,23 +262,23 @@ void arm_wait_timeout(Thread *t, int64_t ns) {
     });
 }
 
-void dump_threads() {
+void dump_threads(std::FILE *to) {
     // best effort: a hung thread may hold the lock
     std::unique_lock lk(k().lock, std::try_to_lock);
-    std::fprintf(stderr, "--- guest threads%s ---\n", lk.owns_lock() ? "" : " (kernel lock busy; may be inconsistent)");
+    std::fprintf(to, "--- guest threads%s ---\n", lk.owns_lock() ? "" : " (kernel lock busy; may be inconsistent)");
     static const char *states[] = {"ready", "running", "waiting", "dead"};
     for (auto &t : k().threads) {
-        std::fprintf(stderr, "thread %u prio %#x %s%s: last svc %#x at %08x (lr %08x)", t->id, t->priority,
+        std::fprintf(to, "thread %u prio %#x %s%s: last svc %#x at %08x (lr %08x)", t->id, t->priority,
                      states[int(t->state)], t.get() == k().current ? " [current]" : "", t->last_svc,
                      t->last_svc_addr, t->last_svc_lr);
         for (auto &o : t->wait_objects) {
             auto *e = dynamic_cast<Event *>(o.get());
-            std::fprintf(stderr, " | waits on %s%s%s", o->type_name(), e ? " " : "", e ? e->name.c_str() : "");
+            std::fprintf(to, " | waits on %s%s%s", o->type_name(), e ? " " : "", e ? e->name.c_str() : "");
             if (auto *m = dynamic_cast<Mutex *>(o.get()); m && m->owner)
-                std::fprintf(stderr, " held by thread %u%s", m->owner->id, m->owner->state == ThreadState::Dead ? " (dead)" : "");
+                std::fprintf(to, " held by thread %u%s", m->owner->id, m->owner->state == ThreadState::Dead ? " (dead)" : "");
         }
-        if (t->arbiter) std::fprintf(stderr, " | arbiter address %08x", t->arbiter_addr);
-        std::fputc('\n', stderr);
+        if (t->arbiter) std::fprintf(to, " | arbiter address %08x", t->arbiter_addr);
+        std::fputc('\n', to);
     }
 }
 
@@ -340,6 +341,26 @@ void init(const GameImage &game) {
         uint8_t *mac = mem::ptr(mem::SHARED_PAGE + 0x60);
         for (int i = 0; i < 6; i++) mac[i] = uint8_t(rd());
         mac[0] = uint8_t((mac[0] & 0xFC) | 0x02); // unicast, locally administered
+    }
+    // DATETIME_0: the console clock, local time in ms since 1900, and the tick it was read at;
+    // games add the ticks since (without it, the date reads as 1 Jan 1900)
+    {
+        auto now = std::chrono::system_clock::now();
+        std::time_t t = std::chrono::system_clock::to_time_t(now);
+        std::tm utc{};
+#ifdef _WIN32
+        gmtime_s(&utc, &t);
+#else
+        gmtime_r(&t, &utc);
+#endif
+        utc.tm_isdst = -1;
+        int64_t offset = int64_t(t) - int64_t(std::mktime(&utc)); // local time minus UTC
+        int64_t ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+        uint64_t date_time = uint64_t(ms + (offset + 2208988800ll) * 1000); // 1900 to 1970: 2208988800 s
+        uint64_t tick = ticks();
+        uint32_t words[8] = {uint32_t(date_time), uint32_t(date_time >> 32), uint32_t(tick), uint32_t(tick >> 32),
+                             uint32_t(TICKS_PER_SECOND), 0, 0, 0}; // then the tick rate and a tick offset
+        for (int i = 0; i < 8; i++) mem::write32(mem::SHARED_PAGE + 0x20 + 4 * i, words[i]);
     }
     k().timer_thread = std::thread(timer_loop);
     k().timer_thread.detach();

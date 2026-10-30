@@ -2,7 +2,10 @@
 
 #include "recomp.h"
 
+#include <algorithm>
+#include <chrono>
 #include <cstdarg>
+#include <mutex>
 #include <cstdlib>
 #include <cstring>
 
@@ -12,7 +15,42 @@ bool ipc = false;
 bool gpu = false;
 bool dsp = false;
 
+bool recent = false;
+
+namespace {
+constexpr size_t RECENT_LINES = 1 << 18, LINE = 128; // 32 MiB
+char (*lines)[LINE];
+size_t next_line = 0;
+std::mutex recent_lock;
+const auto start = std::chrono::steady_clock::now();
+} // namespace
+
+void remember(const char *fmt, ...) {
+    double s = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    std::lock_guard lk(recent_lock);
+    char *line = lines[next_line++ % RECENT_LINES];
+    int n = std::snprintf(line, LINE, "%9.3f ", s);
+    va_list args;
+    va_start(args, fmt);
+    std::vsnprintf(line + n, LINE - size_t(n), fmt, args);
+    va_end(args);
+}
+
+void save_recent(const char *path) {
+    if (!recent) return;
+    std::FILE *f = std::fopen(path, "w");
+    if (!f) return;
+    std::lock_guard lk(recent_lock);
+    size_t n = std::min(next_line, RECENT_LINES);
+    for (size_t i = next_line - n; i < next_line; i++) std::fprintf(f, "%s\n", lines[i % RECENT_LINES]);
+    std::fclose(f);
+}
+
 void init() {
+    if (!std::getenv("YW2_NO_RECENT")) {
+        lines = new char[RECENT_LINES][LINE];
+        recent = true;
+    }
     const char *t = std::getenv("RECOMP_TRACE");
     if (!t) return;
     svc = std::strstr(t, "svc") != nullptr;
